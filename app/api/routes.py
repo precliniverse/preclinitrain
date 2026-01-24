@@ -1,0 +1,1615 @@
+from flask import jsonify, request, current_app, url_for
+from flask_restx import Resource, fields
+from flask_login import login_required, current_user
+from app.api import api
+from app import db
+from app.models import User, Team, Species, Skill, TrainingPath, TrainingSession, Competency, SkillPracticeEvent, TrainingRequest, ExternalTraining, Complexity, TrainingRequestStatus, ExternalTrainingStatus, TrainingSessionTutorSkill, UserContinuousTraining, UserContinuousTrainingStatus, ContinuousTrainingEvent, ContinuousTrainingEventStatus, UserDismissedNotification
+from sqlalchemy import func
+from werkzeug.security import generate_password_hash
+from functools import wraps # Import wraps
+import secrets # Import secrets
+from datetime import datetime, timedelta, timezone # Import datetime
+from app.decorators import permission_required # Import permission_required
+
+# API Models for marshalling
+
+# Define skill_model first as it's a dependency for user_model
+skill_model = api.model('Skill', {
+    'id': fields.Integer(readOnly=True),
+    'name': fields.String(required=True, description='Skill name'),
+    'description': fields.String(description='Skill description'),
+    'validity_period_months': fields.Integer(description='Validity period in months'),
+    'complexity': fields.String(enum=[c.value for c in Complexity], description='Complexity level'),
+    'reference_urls_text': fields.String(description='Comma-separated reference URLs'),
+    'protocol_attachment_path': fields.String(description='Path to protocol attachment'),
+    'training_videos_urls_text': fields.String(description='Comma-separated training video URLs'),
+    'potential_external_tutors_text': fields.String(description='Comma-separated potential external tutors'),
+    'species_ids': fields.List(fields.Integer, description='List of associated species IDs', attribute=lambda x: [s.id for s in x.species]),
+    'tutor_ids': fields.List(fields.Integer, description='List of associated tutor IDs', attribute=lambda x: [t.id for t in x.tutors]),
+})
+
+user_preview_model = api.model('UserPreview', {
+    'id': fields.Integer(readOnly=True, description='The unique identifier of a user'),
+    'full_name': fields.String(required=True, description='Full name of the user'),
+})
+
+team_model = api.model('Team', {
+    'id': fields.Integer(readOnly=True, description='The unique identifier of a team'),
+    'name': fields.String(required=True, description='The name of the team'),
+    'members': fields.List(fields.Nested(user_preview_model), description='Members of the team'),
+    'team_leads': fields.List(fields.Nested(user_preview_model), description='Team leads of the team')
+})
+
+user_model = api.model('User', {
+    'id': fields.Integer(readOnly=True, description='The unique identifier of a user'),
+    'full_name': fields.String(required=True, description='Full name of the user'),
+    'email': fields.String(required=True, description='Email address of the user'),
+    'is_admin': fields.Boolean(description='Whether the user is an administrator'),
+    'teams': fields.List(fields.Nested(team_model), description='Teams the user belongs to'),
+    'teams_as_lead': fields.List(fields.Nested(team_model), description='Teams the user leads')
+})
+
+species_model = api.model('Species', {
+    'id': fields.Integer(readOnly=True),
+    'name': fields.String(required=True, description='Species name'),
+})
+
+
+training_path_model = api.model('TrainingPath', {
+    'id': fields.Integer(readOnly=True),
+    'name': fields.String(required=True, description='Training path name'),
+    'description': fields.String(description='Training path description'),
+    'skill_ids': fields.List(fields.Integer, description='List of skill IDs in this path', attribute=lambda x: [s.id for s in x.skills]),
+    'assigned_user_ids': fields.List(fields.Integer, description='List of user IDs assigned to this path', attribute=lambda x: [u.id for u in x.assigned_users]),
+})
+
+training_session_model = api.model('TrainingSession', {
+    'id': fields.Integer(readOnly=True),
+    'title': fields.String(required=True, description='Session title'),
+    'location': fields.String(description='Session location'),
+    'start_time': fields.DateTime(dt_format='iso8601', description='Session start time (ISO 8601)'),
+    'end_time': fields.DateTime(dt_format='iso8601', description='Session end time (ISO 8601)'),
+    'tutor_id': fields.Integer(description='ID of the tutor'),
+    'ethical_authorization_id': fields.String(description='Ethical authorization ID'),
+    'animal_count': fields.Integer(description='Number of animals involved'),
+    'attachment_path': fields.String(description='Path to session attachment'),
+    'attendee_ids': fields.List(fields.Integer, description='List of attendee user IDs', attribute=lambda x: [u.id for u in x.attendees]),
+    'skills_covered_ids': fields.List(fields.Integer, description='List of skills covered IDs', attribute=lambda x: [s.id for s in x.skills_covered]),
+})
+
+competency_model = api.model('Competency', {
+    'id': fields.Integer(readOnly=True),
+    'user_id': fields.Integer(required=True, description='ID of the user'),
+    'skill_id': fields.Integer(required=True, description='ID of the skill'),
+    'level': fields.String(description='Competency level'),
+    'evaluation_date': fields.DateTime(dt_format='iso8601', description='Evaluation date (ISO 8601)'),
+    'evaluator_id': fields.Integer(description='ID of the evaluator'),
+    'training_session_id': fields.Integer(description='ID of the training session'),
+    'certificate_path': fields.String(description='Path to certificate'),
+})
+
+skill_practice_event_model = api.model('SkillPracticeEvent', {
+    'id': fields.Integer(readOnly=True),
+    'user_id': fields.Integer(required=True, description='ID of the user'),
+    'skill_id': fields.Integer(required=True, description='ID of the skill'),
+    'practice_date': fields.DateTime(dt_format='iso8601', description='Practice date (ISO 8601)'),
+    'notes': fields.String(description='Notes about the practice'),
+})
+
+training_request_model = api.model('TrainingRequest', {
+    'id': fields.Integer(readOnly=True),
+    'requester_id': fields.Integer(required=True, description='ID of the requester'),
+    'request_date': fields.DateTime(dt_format='iso8601', description='Request date (ISO 8601)'),
+    'status': fields.String(enum=[s.value for s in TrainingRequestStatus], description='Request status'),
+    'skills_requested_ids': fields.List(fields.Integer, description='List of requested skill IDs', attribute=lambda x: [s.id for s in x.skills_requested]),
+})
+
+external_training_model = api.model('ExternalTraining', {
+    'id': fields.Integer(readOnly=True),
+    'user_id': fields.Integer(required=True, description='ID of the user'),
+    'external_trainer_name': fields.String(description='Name of the external trainer'),
+    'date': fields.DateTime(dt_format='iso8601', description='Date of external training (ISO 8601)'),
+    'attachment_path': fields.String(description='Path to attachment'),
+    'status': fields.String(enum=[s.value for s in ExternalTrainingStatus], description='Status of external training'),
+    'validator_id': fields.Integer(description='ID of the validator'),
+    'skills_claimed_ids': fields.List(fields.Integer, description='List of claimed skill IDs', attribute=lambda x: [s.skill_id for s in x.skill_claims]),
+})
+
+skill_ids_payload = api.model('SkillIdsPayload', {
+    'skill_ids': fields.List(fields.Integer, required=True, description='List of skill IDs')
+})
+
+
+tutor_validity_payload = api.model('TutorValidityPayload', {
+    'skill_id': fields.Integer(required=True, description='Skill ID'),
+    'training_date': fields.String(required=True, description='Date of the training')
+})
+
+# New payload model for declaring a practice
+declare_practice_payload = api.model('DeclarePracticePayload', {
+    'skill_id': fields.Integer(required=True, description='ID of the skill for which practice is declared'),
+    'notes': fields.String(description='Optional notes about the practice')
+})
+
+# Public API models
+check_competency_payload = api.model('CheckCompetencyPayload', {
+    'emails': fields.List(fields.String, required=True, description='List of user emails'),
+    'skill_ids': fields.List(fields.Integer, required=True, description='List of skill IDs')
+})
+
+declare_practice_public_payload = api.model('DeclarePracticePublicPayload', {
+    'email': fields.String(required=True, description='User email'),
+    'skill_ids': fields.List(fields.Integer, required=True, description='List of skill IDs'),
+    'date': fields.String(required=True, description='Practice date in YYYY-MM-DD'),
+    'source': fields.String(required=True, description='Source of the practice')
+})
+
+
+# API Key Authentication
+def token_required(f):
+    @api.doc(security='apikey')
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        api_key = request.headers.get('X-API-Key')
+        if not api_key:
+            current_app.logger.warning(f"API Key missing for API access from IP: {request.remote_addr}.")
+            api.abort(401, "API Key is missing")
+
+        users_with_keys = User.query.filter(User.api_key.isnot(None)).all()
+        found_user = None
+        for user in users_with_keys:
+            if secrets.compare_digest(user.api_key, api_key):
+                found_user = user
+                break
+
+        if not found_user:
+            current_app.logger.warning(f"Invalid API Key provided from IP: {request.remote_addr}. No active user found for key: {api_key[:5]}...")
+            api.abort(401, "Invalid API Key")
+
+        if not found_user.is_approved:
+            current_app.logger.warning(f"Unapproved user (ID: {found_user.id}) attempted API access with valid API Key from IP: {request.remote_addr}.")
+            api.abort(403, "User account is not approved.")
+
+        from flask import g
+        g.current_user = found_user
+
+        return f(*args, **kwargs)
+    return decorated
+
+# Service Token Authentication for inter-app communication
+def service_token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        service_key = request.headers.get('X-Service-Key')
+        if not service_key:
+            api.abort(401, "Service Key is missing")
+
+        expected_key = current_app.config.get('SERVICE_API_KEY')
+        if not expected_key or not secrets.compare_digest(service_key, expected_key):
+            api.abort(401, "Invalid Service Key")
+
+        return f(*args, **kwargs)
+    return decorated
+
+# Namespaces
+ns_users = api.namespace('users', description='User operations')
+# ... (other namespaces)
+
+@ns_users.route('/search')
+class UserSearch(Resource):
+    @api.marshal_list_with(user_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('user_manage') # Assuming user_manage for searching all users
+    def get(self):
+        """Search for users by full name or email"""
+        query = request.args.get('q', '')
+        if query:
+            users = User.query.filter(
+                (User.full_name.ilike(f'%{query}%')) | 
+                (User.email.ilike(f'%{query}%'))
+            ).all()
+        else:
+            users = User.query.all() # Return all users if no query
+        return users
+ns_teams = api.namespace('teams', description='Team operations')
+ns_species = api.namespace('species', description='Species operations')
+ns_skills = api.namespace('skills', description='Skill operations')
+ns_tutors = api.namespace('tutors', description='Tutor operations')
+ns_training_paths = api.namespace('training_paths', description='Training Path operations')
+ns_training_sessions = api.namespace('training_sessions', description='Training Session operations')
+ns_competencies = api.namespace('competencies', description='Competency operations')
+ns_skill_practice_events = api.namespace('skill_practice_events', description='Skill Practice Event operations')
+ns_training_requests = api.namespace('training_requests', description='Training Request operations')
+ns_external_trainings = api.namespace('external_trainings', description='External Training operations')
+
+# Public namespace for inter-app communication
+ns_public = api.namespace('public', description='Public endpoints for inter-app communication')
+
+@api.route('/test')
+class TestResource(Resource):
+    def get(self):
+        print("[DEBUG] Test endpoint reached!")
+        return {'message': 'Test endpoint reached successfully!'}, 200
+
+
+# User Endpoints
+@ns_users.route('/')
+class UserList(Resource):
+    @api.marshal_list_with(user_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('user_manage')
+    def get(self):
+        """List all users"""
+        return User.query.all()
+
+    @api.expect(user_model)
+    @api.marshal_with(user_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('user_manage')
+    def post(self):
+        """Create a new user"""
+        data = api.payload
+        user = User(full_name=data['full_name'], email=data['email'],
+                    is_admin=data.get('is_admin', False))
+        user.set_password(data['password'])
+        if 'team_id' in data:
+            user.team = Team.query.get(data['team_id'])
+        db.session.add(user)
+        db.session.commit()
+        return user, 201
+
+@ns_users.route('/<int:id>')
+@api.response(404, 'User not found')
+@api.param('id', 'The user identifier')
+class UserResource(Resource):
+    @api.marshal_with(user_model)
+    @api.doc(security='apikey')
+    @token_required
+    def get(self, id):
+        """Retrieve a user by ID"""
+        from flask import g
+        if g.current_user.id == id or g.current_user.can('user_manage'):
+            return User.query.get_or_404(id)
+        api.abort(403, "You are not authorized to view this user.")
+
+    @api.expect(user_model)
+    @api.marshal_with(user_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('user_manage') # Assuming user_manage for updating any user
+    def put(self, id):
+        """Update a user by ID"""
+        user = User.query.get_or_404(id)
+        data = api.payload
+        user.full_name = data['full_name']
+        user.email = data['email']
+        user.is_admin = data.get('is_admin', user.is_admin)
+        if 'password' in data:
+            user.set_password(data['password'])
+        if 'team_id' in data:
+            user.team = Team.query.get(data['team_id'])
+        
+        # Generate API key if it's missing
+        if user.api_key is None:
+            user.generate_api_key()
+
+        db.session.commit()
+        return user
+
+    @api.response(204, 'User deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('user_manage')
+    def delete(self, id):
+        """Delete a user by ID"""
+        user = User.query.get_or_404(id)
+        db.session.delete(user)
+        db.session.commit()
+        return '', 204
+
+@ns_users.route('/available_skills')
+class UserAvailableSkills(Resource):
+    @api.marshal_list_with(skill_model)
+    @api.doc(security='apikey', description='List skills for which the authenticated user has a valid (not outdated) competency.')
+    @token_required
+    @permission_required('self_view_profile') # Assuming a user can view their own skills
+    def get(self):
+        """List available skills for the authenticated user (not outdated)"""
+        from flask import g
+        user = g.current_user
+
+        available_skills = []
+        for competency in user.competencies:
+            if not competency.needs_recycling:
+                available_skills.append(competency.skill)
+        return available_skills
+
+@ns_users.route('/declare_practice')
+class UserDeclarePractice(Resource):
+    @api.expect(declare_practice_payload)
+    @api.response(201, 'Skill practice declared successfully')
+    @api.response(404, 'Skill not found')
+    @api.doc(security='apikey', description='Declare a practice event for a specific skill for the authenticated user.')
+    @token_required
+    @permission_required('self_declare_skill_practice') # Assuming a user can declare their own skill practice
+    def post(self):
+        """Declare a practice for a specific skill for the authenticated user"""
+        from flask import g
+        user = g.current_user
+        data = api.payload
+        skill_id = data['skill_id']
+        notes = data.get('notes')
+
+        skill = Skill.query.get(skill_id)
+        if not skill:
+            api.abort(404, "Skill not found")
+
+        practice_event = SkillPracticeEvent(
+            user=user,
+            practice_date=datetime.now(timezone.utc),
+            notes=notes
+        )
+        practice_event.skills.append(skill) # Assuming SkillPracticeEvent has a 'skills' relationship
+        
+        db.session.add(practice_event)
+        db.session.commit()
+
+        return {'message': 'Skill practice declared successfully', 'event_id': practice_event.id}, 201
+
+# Team Endpoints
+@ns_teams.route('/')
+class TeamList(Resource):
+    @api.marshal_list_with(team_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('team_manage') # Assuming team_manage for listing all teams
+    def get(self):
+        """List all teams"""
+        return Team.query.all()
+
+    @api.expect(team_model)
+    @api.marshal_with(team_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('team_manage')
+    def post(self):
+        """Create a new team"""
+        data = api.payload
+        team = Team(name=data['name'])
+        if 'lead_id' in data:
+            team.lead = User.query.get(data['lead_id'])
+        db.session.add(team)
+        db.session.commit()
+        return team, 201
+
+@ns_teams.route('/<int:id>')
+@api.response(404, 'Team not found')
+@api.param('id', 'The team identifier')
+class TeamResource(Resource):
+    @api.marshal_with(team_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('team_manage') # Assuming team_manage for viewing any team
+    def get(self, id):
+        """Retrieve a team by ID"""
+        return Team.query.get_or_404(id)
+
+    @api.expect(team_model)
+    @api.marshal_with(team_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('team_manage') # Assuming team_manage for updating any team
+    def put(self, id):
+        """Update a team by ID"""
+        team = Team.query.get_or_404(id)
+        data = api.payload
+        team.name = data['name']
+        if 'lead_id' in data:
+            team.lead = User.query.get(data['lead_id'])
+        db.session.commit()
+        return team
+
+    @api.response(204, 'Team deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('team_manage')
+    def delete(self, id):
+        """Delete a team by ID"""
+        team = Team.query.get_or_404(id)
+        db.session.delete(team)
+        db.session.commit()
+        return '', 204
+
+# Species Endpoints
+@ns_species.route('/')
+class SpeciesList(Resource):
+    @api.marshal_list_with(species_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('species_manage')
+    def get(self):
+        """List all species"""
+        return Species.query.all()
+
+    @api.expect(species_model)
+    @api.marshal_with(species_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('species_manage')
+    def post(self):
+        """Create a new species"""
+        data = api.payload
+        species = Species(name=data['name'])
+        db.session.add(species)
+        db.session.commit()
+        return species, 201
+
+@ns_species.route('/<int:id>/skills')
+@api.response(404, 'Species not found')
+@api.param('id', 'The species identifier')
+class SpeciesSkills(Resource):
+    @api.marshal_list_with(skill_model)
+    @api.doc(security='apikey')
+    @token_required
+    def get(self, id):
+        """Retrieve skills for a species by ID"""
+        species = Species.query.get_or_404(id)
+        return species.skills
+
+@ns_species.route('/<int:id>/filtered_skills')
+@api.response(404, 'Species not found')
+@api.param('id', 'The species identifier')
+class SpeciesFilteredSkills(Resource):
+    @api.marshal_list_with(skill_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('species_manage') # Assuming species_manage for viewing filtered skills by species
+    def get(self, id):
+        """Retrieve skills for a species by ID"""
+        species = Species.query.get_or_404(id)
+        return species.skills
+
+@ns_species.route('/<int:id>')
+@api.response(404, 'Species not found')
+@api.param('id', 'The species identifier')
+class SpeciesResource(Resource):
+    @api.marshal_with(species_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('species_manage')
+    def get(self, id):
+        """Retrieve a species by ID"""
+        return Species.query.get_or_404(id)
+
+    @api.expect(species_model)
+    @api.marshal_with(species_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('species_manage')
+    def put(self, id):
+        """Update a species by ID"""
+        species = Species.query.get_or_404(id)
+        data = api.payload
+        species.name = data['name']
+        db.session.commit()
+        return species
+
+    @api.response(204, 'Species deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('species_manage')
+    def delete(self, id):
+        """Delete a species by ID"""
+        species = Species.query.get_or_404(id)
+        db.session.delete(species)
+        db.session.commit()
+        return '', 204
+
+# Training Path Endpoints
+@ns_training_paths.route('/')
+class TrainingPathList(Resource):
+    @api.marshal_list_with(training_path_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_path_manage')
+    def get(self):
+        """List all training paths"""
+        return TrainingPath.query.all()
+
+    @api.expect(training_path_model)
+    @api.marshal_with(training_path_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_path_manage')
+    def post(self):
+        """Create a new training path"""
+        data = api.payload
+        training_path = TrainingPath(name=data['name'], description=data.get('description'))
+        
+        if 'skill_ids' in data:
+            training_path.skills = Skill.query.filter(Skill.id.in_(data['skill_ids'])).all()
+        if 'assigned_user_ids' in data:
+            training_path.assigned_users = User.query.filter(User.id.in_(data['assigned_user_ids'])).all()
+
+        db.session.add(training_path)
+        db.session.commit()
+        return training_path, 201
+
+@ns_training_paths.route('/<int:id>')
+@api.response(404, 'Training Path not found')
+@api.param('id', 'The training path identifier')
+class TrainingPathResource(Resource):
+    @api.marshal_with(training_path_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_path_manage')
+    def get(self, id):
+        """Retrieve a training path by ID"""
+        return TrainingPath.query.get_or_404(id)
+
+    @api.expect(training_path_model)
+    @api.marshal_with(training_path_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_path_manage')
+    def put(self, id):
+        """Update a training path by ID"""
+        training_path = TrainingPath.query.get_or_404(id)
+        data = api.payload
+        training_path.name = data['name']
+        training_path.description = data.get('description', training_path.description)
+
+        if 'skill_ids' in data:
+            training_path.skills = Skill.query.filter(Skill.id.in_(data['skill_ids'])).all()
+        if 'assigned_user_ids' in data:
+            training_path.assigned_users = User.query.filter(User.id.in_(data['assigned_user_ids'])).all()
+
+        db.session.commit()
+        return training_path
+
+    @api.response(204, 'Training Path deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_path_manage')
+    def delete(self, id):
+        """Delete a training path by ID"""
+        training_path = TrainingPath.query.get_or_404(id)
+        db.session.delete(training_path)
+        db.session.commit()
+        return '', 204
+
+# Training Session Endpoints
+@ns_training_sessions.route('/<int:id>/tutor_skill_mappings')
+@api.response(404, 'Training Session not found')
+@api.param('id', 'The training session identifier')
+class TrainingSessionTutorSkillMapping(Resource):
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_session_manage') # Assuming training_session_manage for viewing mappings
+    def get(self, id):
+        """Retrieve tutor skill mappings for a training session by ID"""
+        session = TrainingSession.query.get_or_404(id)
+        mappings = TrainingSessionTutorSkill.query.filter_by(training_session_id=session.id).all()
+        return [{'tutor_id': m.tutor_id, 'skill_id': m.skill_id} for m in mappings]
+
+@ns_training_sessions.route('/')
+class TrainingSessionList(Resource):
+    @api.marshal_list_with(training_session_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_session_manage')
+    def get(self):
+        """List all training sessions"""
+        return TrainingSession.query.all()
+
+    @api.expect(training_session_model)
+    @api.marshal_with(training_session_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_session_manage')
+    def post(self):
+        """Create a new training session"""
+        data = api.payload
+        session = TrainingSession(
+            title=data['title'],
+            location=data.get('location'),
+            start_time=datetime.fromisoformat(data['start_time']),
+            end_time=datetime.fromisoformat(data['end_time']),
+            ethical_authorization_id=data.get('ethical_authorization_id'),
+            animal_count=data.get('animal_count'),
+            attachment_path=data.get('attachment_path')
+        )
+        if 'tutor_id' in data:
+            session.tutor = User.query.get(data['tutor_id'])
+        if 'attendee_ids' in data:
+            session.attendees = User.query.filter(User.id.in_(data['attendee_ids'])).all()
+        if 'skills_covered_ids' in data:
+            session.skills_covered = Skill.query.filter(Skill.id.in_(data['skills_covered_ids'])).all()
+        
+        db.session.add(session)
+        db.session.commit()
+        return session, 201
+
+@ns_training_sessions.route('/<int:id>')
+@api.response(404, 'Training Session not found')
+@api.param('id', 'The training session identifier')
+class TrainingSessionResource(Resource):
+    @api.marshal_with(training_session_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_session_manage')
+    def get(self, id):
+        """Retrieve a training session by ID"""
+        return TrainingSession.query.get_or_404(id)
+
+    @api.expect(training_session_model)
+    @api.marshal_with(training_session_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_session_manage')
+    def put(self, id):
+        """Update a training session by ID"""
+        session = TrainingSession.query.get_or_404(id)
+        data = api.payload
+        session.title = data['title']
+        session.location = data.get('location', session.location)
+        session.start_time = datetime.fromisoformat(data['start_time'])
+        session.end_time = datetime.fromisoformat(data['end_time'])
+        session.ethical_authorization_id = data.get('ethical_authorization_id', session.ethical_authorization_id)
+        session.animal_count = data.get('animal_count', session.animal_count)
+        session.attachment_path = data.get('attachment_path', session.attachment_path)
+
+        if 'tutor_id' in data:
+            session.tutor = User.query.get(data['tutor_id'])
+        if 'attendee_ids' in data:
+            session.attendees = User.query.filter(User.id.in_(data['attendee_ids'])).all()
+        if 'skills_covered_ids' in data:
+            session.skills_covered = Skill.query.filter(Skill.id.in_(data['skills_covered_ids'])).all()
+
+        db.session.commit()
+        return session
+
+    @api.response(204, 'Training Session deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_session_manage')
+    def delete(self, id):
+        """Delete a training session by ID"""
+        session = TrainingSession.query.get_or_404(id)
+        db.session.delete(session)
+        db.session.commit()
+        return '', 204
+
+# Competency Endpoints
+@ns_competencies.route('/')
+class CompetencyList(Resource):
+    @api.marshal_list_with(competency_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('competency_manage') # Assuming competency_manage for listing all competencies
+    def get(self):
+        """List all competencies"""
+        return Competency.query.all()
+
+    @api.expect(competency_model)
+    @api.marshal_with(competency_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('competency_manage')
+    def post(self):
+        """Create a new competency"""
+        data = api.payload
+        training_session_obj = TrainingSession(title='Test Session', start_time=datetime.now(timezone.utc), end_time=datetime.now(timezone.utc) + timedelta(hours=1))
+        db.session.add(training_session_obj)
+        db.session.flush() # Flush to get an ID for the training_session_obj before committing competency
+
+        competency = Competency(
+            user_id=data['user_id'],
+            skill_id=data['skill_id'],
+            level=data.get('level'),
+            training_session=training_session_obj,
+            certificate_path=data.get('certificate_path')
+        )
+        if 'evaluator_id' in data:
+            competency.evaluator = User.query.get(data['evaluator_id'])
+        if 'training_session_id' in data:
+            competency.training_session = TrainingSession.query.get(data['training_session_id'])
+        
+        db.session.add(competency)
+        db.session.commit()
+        return competency, 201
+
+@ns_competencies.route('/<int:id>')
+@api.response(404, 'Competency not found')
+@api.param('id', 'The competency identifier')
+class CompetencyResource(Resource):
+    @api.marshal_with(competency_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('competency_manage') # Assuming competency_manage for viewing any competency
+    def get(self, id):
+        """Retrieve a competency by ID"""
+        return Competency.query.get_or_404(id)
+
+    @api.expect(competency_model)
+    @api.marshal_with(competency_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('competency_manage') # Assuming competency_manage for updating any competency
+    def put(self, id):
+        """Update a competency by ID"""
+        competency = Competency.query.get_or_404(id)
+        data = api.payload
+        competency.user_id = data['user_id']
+        competency.skill_id = data['skill_id']
+        competency.level = data.get('level', competency.level)
+        competency.evaluation_date = datetime.fromisoformat(data['evaluation_date']) if 'evaluation_date' in data else competency.evaluation_date
+        competency.certificate_path = data.get('certificate_path', competency.certificate_path)
+
+        if 'evaluator_id' in data:
+            competency.evaluator = User.query.get(data['evaluator_id'])
+        if 'training_session_id' in data:
+            competency.training_session = TrainingSession.query.get(data['training_session_id'])
+
+        db.session.commit()
+        return competency
+
+    @api.response(204, 'Competency deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('competency_manage')
+    def delete(self, id):
+        """Delete a competency by ID"""
+        competency = Competency.query.get_or_404(id)
+        db.session.delete(competency)
+        db.session.commit()
+        return '', 204
+
+# Skill Practice Event Endpoints
+@ns_skill_practice_events.route('/')
+class SkillPracticeEventList(Resource):
+    @api.marshal_list_with(skill_practice_event_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_practice_manage') # Assuming skill_practice_manage for listing all events
+    def get(self):
+        """List all skill practice events"""
+        return SkillPracticeEvent.query.all()
+
+    @api.expect(skill_practice_event_model)
+    @api.marshal_with(skill_practice_event_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_practice_manage')
+    def post(self):
+        """Create a new skill practice event"""
+        data = api.payload
+        event = SkillPracticeEvent(
+            user_id=data['user_id'],
+            practice_date=datetime.fromisoformat(data['practice_date']) if 'practice_date' in data else datetime.now(timezone.utc),
+            notes=data.get('notes')
+        )
+        for skill_id in data['skill_ids']:
+            skill = Skill.query.get(skill_id)
+            if skill:
+                event.skills.append(skill)
+        db.session.add(event)
+        db.session.commit()
+        return event, 201
+
+@ns_skill_practice_events.route('/<int:id>')
+@api.response(404, 'Skill Practice Event not found')
+@api.param('id', 'The skill practice event identifier')
+class SkillPracticeEventResource(Resource):
+    @api.marshal_with(skill_practice_event_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_practice_manage') # Assuming skill_practice_manage for viewing any event
+    def get(self, id):
+        """Retrieve a skill practice event by ID"""
+        return SkillPracticeEvent.query.get_or_404(id)
+
+    @api.expect(skill_practice_event_model)
+    @api.marshal_with(skill_practice_event_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_practice_manage') # Assuming skill_practice_manage for updating any event
+    def put(self, id):
+        """Update a skill practice event by ID"""
+        event = SkillPracticeEvent.query.get_or_404(id)
+        data = api.payload
+        event.user_id = data['user_id']
+        event.skill_id = data['skill_id']
+        event.practice_date = datetime.fromisoformat(data['practice_date']) if 'practice_date' in data else event.practice_date
+        event.notes = data.get('notes', event.notes)
+        db.session.commit()
+        return event
+
+    @api.response(204, 'Skill Practice Event deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_practice_manage')
+    def delete(self, id):
+        """Delete a skill practice event by ID"""
+        event = SkillPracticeEvent.query.get_or_404(id)
+        db.session.delete(event)
+        db.session.commit()
+        return '', 204
+
+# Training Request Endpoints
+@ns_training_requests.route('/')
+class TrainingRequestList(Resource):
+    @api.marshal_list_with(training_request_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_request_manage')
+    def get(self):
+        """List all training requests"""
+        return TrainingRequest.query.all()
+
+    @api.expect(training_request_model)
+    @api.marshal_with(training_request_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_request_manage')
+    def post(self):
+        """Create a new training request"""
+        data = api.payload
+        training_request = TrainingRequest(
+            requester_id=data['requester_id'],
+            request_date=datetime.fromisoformat(data['request_date']) if 'request_date' in data else datetime.now(timezone.utc),
+            status=TrainingRequestStatus[data['status'].upper()] if 'status' in data else TrainingRequestStatus.PENDING
+        )
+        if 'skills_requested_ids' in data:
+            training_request.skills_requested = Skill.query.filter(Skill.id.in_(data['skills_requested_ids'])).all()
+        
+        db.session.add(training_request)
+        db.session.commit()
+        return training_request, 201
+
+@ns_training_requests.route('/<int:id>')
+@api.response(404, 'Training Request not found')
+@api.param('id', 'The training request identifier')
+class TrainingRequestResource(Resource):
+    @api.marshal_with(training_request_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_request_manage')
+    def get(self, id):
+        """Retrieve a training request by ID"""
+        return TrainingRequest.query.get_or_404(id)
+
+    @api.expect(training_request_model)
+    @api.marshal_with(training_request_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_request_manage')
+    def put(self, id):
+        """Update a training request by ID"""
+        training_request = TrainingRequest.query.get_or_404(id)
+        data = api.payload
+        training_request.requester_id = data['requester_id']
+        training_request.request_date = datetime.fromisoformat(data['request_date']) if 'request_date' in data else training_request.request_date
+        training_request.status = TrainingRequestStatus[data['status'].upper()] if 'status' in data else training_request.status
+
+        if 'skills_requested_ids' in data:
+            training_request.skills_requested = Skill.query.filter(Skill.id.in_(data['skills_requested_ids'])).all()
+
+        db.session.commit()
+        return training_request
+
+    @api.response(204, 'Training Request deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('training_request_manage')
+    def delete(self, id):
+        """Delete a training request by ID"""
+        training_request = TrainingRequest.query.get_or_404(id)
+        db.session.delete(training_request)
+        db.session.commit()
+        return '', 204
+
+# External Training Endpoints
+@ns_external_trainings.route('/')
+class ExternalTrainingList(Resource):
+    @api.marshal_list_with(external_training_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('external_training_validate') # Assuming external_training_validate for listing all external trainings
+    def get(self):
+        """List all external trainings"""
+        return ExternalTraining.query.all()
+
+    @api.expect(external_training_model)
+    @api.marshal_with(external_training_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('external_training_validate')
+    def post(self):
+        """Create a new external training"""
+        data = api.payload
+        external_training = ExternalTraining(
+            user_id=data['user_id'],
+            external_trainer_name=data.get('external_trainer_name'),
+            date=datetime.fromisoformat(data['date']) if 'date' in data else datetime.now(timezone.utc),
+            attachment_path=data.get('attachment_path'),
+            status=ExternalTrainingStatus[data['status'].upper()] if 'status' in data else ExternalTrainingStatus.PENDING
+        )
+        if 'validator_id' in data:
+            external_training.validator = User.query.get(data['validator_id'])
+        if 'skills_claimed_ids' in data:
+            external_training.skills_claimed = Skill.query.filter(Skill.id.in_(data['skills_claimed_ids'])).all()
+        
+        db.session.add(external_training)
+        db.session.commit()
+        return external_training, 201
+
+@ns_external_trainings.route('/<int:id>')
+@api.response(404, 'External Training not found')
+@api.param('id', 'The external training identifier')
+class ExternalTrainingResource(Resource):
+    @api.marshal_with(external_training_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('external_training_validate') # Assuming external_training_validate for viewing any external training
+    def get(self, id):
+        """Retrieve an external training by ID"""
+        return ExternalTraining.query.get_or_404(id)
+
+    @api.expect(external_training_model)
+    @api.marshal_with(external_training_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('external_training_validate') # Assuming external_training_validate for updating any external training
+    def put(self, id):
+        """Update an external training by ID"""
+        external_training = ExternalTraining.query.get_or_404(id)
+        data = api.payload
+        external_training.user_id = data['user_id']
+        external_training.external_trainer_name = data.get('external_trainer_name', external_training.external_trainer_name)
+        external_training.date = datetime.fromisoformat(data['date']) if 'date' in data else external_training.date
+        external_training.attachment_path = data.get('attachment_path', external_training.attachment_path)
+        external_training.status = ExternalTrainingStatus[data['status'].upper()] if 'status' in data else external_training.status
+
+        if 'validator_id' in data:
+            external_training.validator = User.query.get(data['validator_id'])
+        if 'skills_claimed_ids' in data:
+            external_training.skills_claimed = Skill.query.filter(Skill.id.in_(data['skills_claimed_ids'])).all()
+
+        db.session.commit()
+        return external_training
+
+    @api.response(204, 'External Training deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('external_training_validate')
+    def delete(self, id):
+        """Delete an external training by ID"""
+        external_training = ExternalTraining.query.get_or_404(id)
+        db.session.delete(external_training)
+        db.session.commit()
+        return '', 204
+
+# Skill Endpoints
+@ns_skills.route('/')
+class SkillListResource(Resource):
+    @api.marshal_list_with(skill_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_manage')
+    def get(self):
+        """List all skills"""
+        return Skill.query.all()
+
+    @api.expect(skill_model)
+    @api.marshal_with(skill_model, code=201)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_manage')
+    def post(self):
+        """Create a new skill"""
+        data = api.payload
+        skill = Skill(name=data['name'], description=data.get('description'),
+                      validity_period_months=data.get('validity_period_months'),
+                      complexity=Complexity[data['complexity'].upper()],
+                      reference_urls_text=data.get('reference_urls_text'),
+                      protocol_attachment_path=data.get('protocol_attachment_path'),
+                      training_videos_urls_text=data.get('training_videos_urls_text'),
+                      potential_external_tutors_text=data.get('potential_external_tutors_text'))
+        
+        if 'species_ids' in data:
+            skill.species = Species.query.filter(Species.id.in_(data['species_ids'])).all()
+        if 'tutor_ids' in data:
+            skill.tutors = User.query.filter(User.id.in_(data['tutor_ids'])).all()
+
+        db.session.add(skill)
+        db.session.commit()
+        return skill, 201
+
+@ns_skills.route('/species')
+class SkillSpecies(Resource):
+    @api.doc(description='Get species for a list of skills.')
+    @api.expect(skill_ids_payload)
+    @token_required
+    @permission_required('skill_manage') # Assuming skill_manage for this operation
+    def post(self):
+        """Get species for a list of skills"""
+        data = api.payload
+        skill_ids = data['skill_ids']
+
+        if not skill_ids:
+            return jsonify({'species': []})
+
+        # Find all skills first
+        skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
+        if not skills or len(skills) != len(skill_ids):
+            return jsonify({'species': []})
+
+        # Get all species for the first skill
+        common_species = set(skills[0].species)
+
+        # Intersect with species of other skills
+        for skill in skills[1:]:
+            common_species.intersection_update(skill.species)
+
+        # Prepare response with species details
+        species_data = []
+        for species in common_species:
+            species_data.append({
+                'id': species.id,
+                'name': species.name,
+            })
+
+        return jsonify({'species': species_data})
+
+@ns_skills.route('/tutors')
+class SkillTutors(Resource):
+    @api.doc(description='Get tutors for a list of skills.')
+    @api.expect(skill_ids_payload)
+    @token_required
+    @permission_required('skill_manage') # Assuming skill_manage for this operation
+    def post(self):
+        """Get tutors for a list of skills"""
+        data = api.payload
+        skill_ids = data['skill_ids']
+
+        if not skill_ids:
+            return jsonify({'tutors': []})
+
+        # Find all skills first
+        skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
+        if not skills or len(skills) != len(skill_ids):
+            return jsonify({'tutors': []})
+
+        # Get all tutors that can teach at least one of the selected skills
+        tutors = set()
+        for skill in skills:
+            tutors.update(skill.tutors)
+
+        # Prepare response with tutor details
+        tutors_data = []
+        for tutor in tutors:
+            tutors_data.append({
+                'id': tutor.id,
+                'full_name': tutor.full_name,
+                'email': tutor.email,
+            })
+
+        return jsonify({'tutors': tutors_data})
+
+@ns_skills.route('/tutors_for_skills')
+class SkillTutorsForSkills(Resource):
+    @api.doc(description='Get tutors who can teach all specified skills.')
+    @api.expect(skill_ids_payload)
+    @token_required
+    @permission_required('skill_manage') # Assuming skill_manage for this operation
+    def post(self):
+        """Get tutors for a list of skills"""
+        data = api.payload
+        skill_ids = data['skill_ids']
+
+        if not skill_ids:
+            return jsonify({'tutors': []})
+
+        # Find all skills first
+        skills = Skill.query.filter(Skill.id.in_(skill_ids)).all()
+        if not skills or len(skills) != len(skill_ids):
+            return jsonify({'tutors': []})
+
+        # Get all potential tutors (users who can tutor at least one of the requested skills)
+        # and then filter them down to those who can tutor ALL requested skills.
+        potential_tutors = set()
+        for skill in skills:
+            potential_tutors.update(skill.tutors)
+
+        qualified_tutors = []
+        for tutor in potential_tutors:
+            # Check if this tutor can teach ALL selected skills
+            if all(skill in tutor.tutored_skills for skill in skills):
+                qualified_tutors.append(tutor)
+
+        # Prepare response with tutor details
+        tutors_data = []
+        for tutor in qualified_tutors:
+            tutors_data.append({
+                'id': tutor.id,
+                'full_name': tutor.full_name,
+                'email': tutor.email,
+            })
+
+        return jsonify({'tutors': tutors_data})
+
+@ns_skills.route('/<int:id>')
+@api.response(404, 'Skill not found')
+@api.param('id', 'The skill identifier')
+class SkillResource(Resource):
+    @api.marshal_with(skill_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_manage')
+    def get(self, id):
+        """Retrieve a skill by ID"""
+        return Skill.query.get_or_404(id)
+
+    @api.expect(skill_model)
+    @api.marshal_with(skill_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_manage')
+    def put(self, id):
+        """Update a skill by ID"""
+        skill = Skill.query.get_or_404(id)
+        data = api.payload
+        skill.name = data['name']
+        skill.description = data.get('description', skill.description)
+        skill.validity_period_months = data.get('validity_period_months', skill.validity_period_months)
+        skill.complexity = Complexity[data['complexity'].upper()]
+        skill.reference_urls_text = data.get('reference_urls_text', skill.reference_urls_text)
+        skill.protocol_attachment_path = data.get('protocol_attachment_path', skill.protocol_attachment_path)
+        skill.training_videos_urls_text = data.get('training_videos_urls_text', skill.training_videos_urls_text)
+        skill.potential_external_tutors_text = data.get('potential_external_tutors_text', skill.potential_external_tutors_text)
+
+        if 'species_ids' in data:
+            skill.species = Species.query.filter(Species.id.in_(data['species_ids'])).all()
+        if 'tutor_ids' in data:
+            skill.tutors = User.query.filter(User.id.in_(data['tutor_ids'])).all()
+
+        db.session.commit()
+        return skill
+
+    @api.response(204, 'Skill deleted')
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('skill_manage')
+    def delete(self, id):
+        """Delete a skill by ID"""
+        skill = Skill.query.get_or_404(id)
+        db.session.delete(skill)
+        db.session.commit()
+        return '', 204
+
+@ns_skills.route('/<int:id>/tutors_with_validity')
+@api.response(404, 'Skill not found')
+@api.param('id', 'The skill identifier')
+class SkillTutorsWithValidity(Resource):
+    @api.doc(security='apikey', params={'training_date': 'The training date in YYYY-MM-DD format'})
+    @token_required
+    @permission_required('tutor_for_skill') # Assuming tutors can view validity for their skills
+    def get(self, id):
+        """Retrieve tutors for a skill with their validity status"""
+        skill = Skill.query.get_or_404(id)
+        training_date_str = request.args.get('training_date')
+        if not training_date_str:
+            api.abort(400, "Training date is required")
+        
+        try:
+            training_date = datetime.strptime(training_date_str, '%Y-%m-%d')
+        except ValueError:
+            api.abort(400, "Invalid date format. Use YYYY-MM-DD.")
+
+        tutors_data = []
+        for tutor in skill.tutors:
+            is_valid = True
+            message = "Tutor is valid."
+
+            if skill.validity_period_months:
+                # Find the latest competency or practice event for this tutor and skill
+                latest_competency = Competency.query.filter_by(user_id=tutor.id, skill_id=skill.id).order_by(Competency.evaluation_date.desc()).first()
+                latest_practice = SkillPracticeEvent.query.join(SkillPracticeEvent.skills).filter(SkillPracticeEvent.user_id == tutor.id, Skill.id == skill.id).order_by(SkillPracticeEvent.practice_date.desc()).first()
+
+                latest_validation_date = None
+                if latest_competency:
+                    latest_validation_date = latest_competency.evaluation_date
+                if latest_practice and (latest_validation_date is None or latest_practice.practice_date > latest_validation_date):
+                    latest_validation_date = latest_practice.practice_date
+
+                if latest_validation_date:
+                    recycling_due_date = latest_validation_date + timedelta(days=skill.validity_period_months * 30.44)
+                    if training_date.date() > recycling_due_date.date():
+                        is_valid = False
+                        message = f"{tutor.full_name}'s competency for {skill.name} has expired."
+                else:
+                    # No competency or practice found, so they are not considered valid for tutoring
+                    is_valid = False
+                    message = f"No validation record found for {tutor.full_name} on skill {skill.name}."
+
+
+            tutors_data.append({
+                'id': tutor.id,
+                'full_name': tutor.full_name,
+                'is_valid': is_valid,
+                'message': message
+            })
+        return jsonify(tutors_data)
+
+@ns_tutors.route('/<int:id>/skills')
+@api.response(404, 'Tutor not found')
+@api.param('id', 'The tutor identifier')
+class TutorSkills(Resource):
+    @api.marshal_list_with(skill_model)
+    @api.doc(security='apikey')
+    @token_required
+    @permission_required('tutor_for_skill') # Assuming tutors can view their own skills
+    def get(self, id):
+        """Retrieve skills for a tutor by ID"""
+        # Allow tutors to view their own skills without explicit permission if they are the current user
+        from flask import g
+        if g.current_user.id == id:
+            tutor = User.query.get_or_404(id)
+            return tutor.tutored_skills
+        # Otherwise, require permission
+        tutor = User.query.get_or_404(id)
+        return tutor.tutored_skills
+
+@ns_tutors.route('/<int:id>/check_validity')
+@api.response(404, 'Tutor not found')
+@api.param('id', 'The tutor identifier')
+class TutorValidity(Resource):
+    @api.doc(description='Check if a tutor is valid for a given skill and a training date.')
+    @api.expect(tutor_validity_payload)
+    @token_required
+    @permission_required('tutor_for_skill') # Assuming tutors can check validity for their skills
+    def post(self, id):
+        """Check tutor validity"""
+        data = api.payload
+        skill_id = data['skill_id']
+        training_date = datetime.strptime(data['training_date'], '%Y-%m-%d')
+
+        tutor = User.query.get_or_404(id)
+
+        skill = Skill.query.get_or_404(skill_id)
+
+        if tutor not in skill.tutors:
+            return jsonify({'is_valid': False, 'message': f'{tutor.full_name} is not a tutor for {skill.name}.'})
+
+        # Check recycling period
+        competency = Competency.query.filter_by(user_id=id, skill_id=skill.id).order_by(Competency.evaluation_date.desc()).first()
+        if competency and competency.evaluation_date:
+            recycling_due_date = competency.evaluation_date + timedelta(days=skill.validity_period_months * 30.44)
+            if training_date > recycling_due_date:
+                return jsonify({'is_valid': False, 'message': f'{tutor.full_name}\'s competency for {skill.name} has expired.'})
+
+        return jsonify({'is_valid': True, 'message': 'Tutor is valid.'})
+
+        return jsonify({'is_valid': True, 'message': 'Tutor is valid.'})
+
+# Notifications Endpoint
+@api.route('/notifications/summary')
+class NotificationSummary(Resource):
+    @api.doc(security='apikey', description='Retrieve a summary of pending actions for the authenticated user.')
+    @token_required
+    def get(self):
+            from flask import g
+            notifications = []
+            total_count = 0
+
+            # Get dismissed notifications for the current user
+            dismissed_notifications = {d.notification_type for d in g.current_user.dismissed_notifications}
+
+            current_app.logger.debug(f"NotificationSummary for user {g.current_user.id}: is_admin={g.current_user.is_admin}, roles={[r.name for r in g.current_user.roles]}, can_user_manage={g.current_user.can('user_manage')}, dismissed_notifications={dismissed_notifications}")
+            # Admin-focused notifications
+            if g.current_user.can('user_manage') and 'user_approvals' not in dismissed_notifications:
+                pending_user_approvals_count = User.query.filter_by(is_approved=False).count()
+                if pending_user_approvals_count > 0:
+                    notifications.append({
+                        'type': 'user_approvals',
+                        'title': 'New User Approvals',
+                        'count': pending_user_approvals_count,
+                        'url': url_for('admin.pending_users')
+                    })
+                    total_count += pending_user_approvals_count
+
+            if g.current_user.can('training_request_manage') and 'training_requests' not in dismissed_notifications:
+                pending_requests_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PENDING).count()
+                if pending_requests_count > 0:
+                    notifications.append({
+                        'type': 'training_requests',
+                        'title': 'Pending Training Requests',
+                        'count': pending_requests_count,
+                        'url': url_for('admin.list_training_requests')
+                    })
+                    total_count += pending_requests_count
+
+            if g.current_user.can('external_training_validate') and 'external_trainings' not in dismissed_notifications:
+                pending_external_trainings_count = ExternalTraining.query.filter_by(status=ExternalTrainingStatus.PENDING).count()
+                if pending_external_trainings_count > 0:
+                    notifications.append({
+                        'type': 'external_trainings',
+                        'title': 'Pending External Training Validations',
+                        'count': pending_external_trainings_count,
+                        'url': url_for('admin.validate_external_trainings')
+                    })
+                    total_count += pending_external_trainings_count
+
+            if g.current_user.can('continuous_training_validate') and 'continuous_training_validations' not in dismissed_notifications:
+                pending_continuous_training_validations_count = UserContinuousTraining.query.filter_by(status=UserContinuousTrainingStatus.PENDING).count()
+                if pending_continuous_training_validations_count > 0:
+                    notifications.append({
+                        'type': 'continuous_training_validations',
+                        'title': 'Pending Continuous Training Validations',
+                        'count': pending_continuous_training_validations_count,
+                        'url': url_for('admin.validate_continuous_trainings')
+                    })
+                    total_count += pending_continuous_training_validations_count
+    
+            if g.current_user.can('continuous_training_manage') and 'continuous_event_requests' not in dismissed_notifications:
+                pending_continuous_event_requests_count = ContinuousTrainingEvent.query.filter_by(status=ContinuousTrainingEventStatus.PENDING).count()
+                if pending_continuous_event_requests_count > 0:
+                    notifications.append({
+                        'type': 'continuous_event_requests',
+                        'title': 'Pending Continuous Event Requests',
+                        'count': pending_continuous_event_requests_count,
+                        'url': url_for('admin.manage_continuous_training_events', status='PENDING')
+                    })
+                    total_count += pending_continuous_event_requests_count
+    
+            if g.current_user.can('skill_manage') and 'proposed_skills' not in dismissed_notifications:
+                proposed_skills_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PROPOSED_SKILL).count()
+                if proposed_skills_count > 0:
+                    notifications.append({
+                        'type': 'proposed_skills',
+                        'title': 'Proposed Skills',
+                        'count': proposed_skills_count,
+                        'url': url_for('admin.proposed_skills')
+                    })
+                    total_count += proposed_skills_count
+    
+            if g.current_user.can('skill_manage') and 'skills_without_tutors' not in dismissed_notifications:
+                skills_without_tutors_count = Skill.query.filter(~Skill.tutors.any()).count()
+                if skills_without_tutors_count > 0:
+                    notifications.append({
+                        'type': 'skills_without_tutors',
+                        'title': 'Skills Without Tutors',
+                        'count': skills_without_tutors_count,
+                        'url': url_for('admin.tutor_less_skills_report')
+                    })
+                    total_count += skills_without_tutors_count
+    
+            if g.current_user.can('training_session_manage') and 'sessions_to_finalize' not in dismissed_notifications:
+                sessions_to_be_finalized_count = TrainingSession.query.filter(
+                    TrainingSession.start_time < datetime.now(timezone.utc),
+                    TrainingSession.status != 'Realized'
+                ).count()
+                if sessions_to_be_finalized_count > 0:
+                    notifications.append({
+                        'type': 'sessions_to_finalize',
+                        'title': 'Sessions to Finalize',
+                        'count': sessions_to_be_finalized_count,
+                        'url': url_for('admin.manage_training_sessions', filter='to_be_finalized')
+                    })
+                    total_count += sessions_to_be_finalized_count
+    
+            # User-focused notifications
+            if g.current_user.is_authenticated:
+                # Skills needing recycling
+                if 'skills_needing_recycling' not in dismissed_notifications:
+                    skills_needing_recycling_count = 0
+                    for comp in g.current_user.competencies:
+                        if comp.needs_recycling:
+                            skills_needing_recycling_count += 1
+                
+                    if skills_needing_recycling_count > 0:
+                        url = url_for('dashboard.dashboard_home')
+                        if g.current_user.can('view_reports'):
+                            url = url_for('admin.recycling_report')
+                        
+                        notifications.append({
+                            'type': 'skills_needing_recycling',
+                            'title': 'Skills Needing Recycling',
+                            'count': skills_needing_recycling_count,
+                            'url': url
+                        })
+                        total_count += skills_needing_recycling_count
+                
+                # Upcoming training sessions
+                if 'upcoming_sessions' not in dismissed_notifications:
+                    now = datetime.now(timezone.utc)
+                    upcoming_training_sessions_count = TrainingSession.query.join(TrainingSession.attendees).filter(User.id == g.current_user.id, TrainingSession.start_time > now).count()
+                    if upcoming_training_sessions_count > 0:
+                        notifications.append({
+                            'type': 'upcoming_sessions',
+                            'title': 'Upcoming Training Sessions',
+                            'count': upcoming_training_sessions_count,
+                            'url': url_for('dashboard.dashboard_home') # Or a dedicated page for upcoming sessions
+                        })
+                        total_count += upcoming_training_sessions_count
+                
+                # Pending training requests by user
+                if 'user_pending_training_requests' not in dismissed_notifications:
+                    user_pending_training_requests_count = TrainingRequest.query.filter_by(requester_id=g.current_user.id, status=TrainingRequestStatus.PENDING).count()
+                    if user_pending_training_requests_count > 0:
+                        notifications.append({
+                            'type': 'user_pending_training_requests',
+                            'title': 'Your Pending Training Requests',
+                            'count': user_pending_training_requests_count,
+                            'url': url_for('dashboard.dashboard_home') # Or a dedicated page for user's requests
+                        })
+                        total_count += user_pending_training_requests_count
+                
+                # Pending external trainings by user
+                if 'user_pending_external_trainings' not in dismissed_notifications:
+                    user_pending_external_trainings_count = g.current_user.external_trainings.filter_by(status=ExternalTrainingStatus.PENDING).count()
+                    if user_pending_external_trainings_count > 0:
+                        notifications.append({
+                            'type': 'user_pending_external_trainings',
+                            'title': 'Your Pending External Trainings',
+                            'count': user_pending_external_trainings_count,
+                            'url': url_for('dashboard.dashboard_home') # Or a dedicated page for user's external trainings
+                        })
+                        total_count += user_pending_external_trainings_count
+    
+            return jsonify({'total_count': total_count, 'notifications': notifications})
+@api.route('/notifications/dismiss')
+class NotificationDismiss(Resource):
+    @api.doc(security='apikey', description='Dismiss a notification for the authenticated user.')
+    @api.expect(api.model('DismissNotification', {'notification_type': fields.String(required=True, description='Type of notification to dismiss'), 'notification_url': fields.String(required=False, description='URL associated with the notification')}))
+    @token_required
+    def post(self):
+        from flask import g
+        data = api.payload
+        notification_type = data.get('notification_type')
+        notification_url = data.get('notification_url')
+
+        if not notification_type:
+            api.abort(400, "Notification type is required.")
+
+        # Record the dismissal
+        dismissal = UserDismissedNotification.query.filter_by(
+            user_id=g.current_user.id,
+            notification_type=notification_type
+        ).first()
+
+        if dismissal:
+            # Update existing dismissal record
+            dismissal.dismissed_at = datetime.now(timezone.utc)
+            dismissal.notification_url = notification_url # Update URL as well
+        else:
+            # Create new dismissal record
+            dismissal = UserDismissedNotification(
+                user_id=g.current_user.id,
+                notification_type=notification_type,
+                notification_url=notification_url,
+                dismissed_at=datetime.now(timezone.utc)
+            )
+            db.session.add(dismissal)
+        
+        db.session.commit()
+        return {'message': f'Notification type {notification_type} dismissed successfully.'}, 200
+
+# Public Endpoints for Inter-App Communication
+@ns_public.route('/skills')
+class PublicSkills(Resource):
+    @api.marshal_list_with(skill_model)
+    @service_token_required
+    def get(self):
+        """List all skills for inter-app communication"""
+        return Skill.query.all()
+
+@ns_public.route('/check_competency')
+class PublicCheckCompetency(Resource):
+    @api.expect(check_competency_payload)
+    @service_token_required
+    def post(self):
+        """Check competency for users and skills"""
+        data = api.payload
+        emails = data['emails']
+        skill_ids = data['skill_ids']
+
+        result = {}
+        for email in emails:
+            user = User.query.filter_by(email=email).first()
+            if not user:
+                result[email] = {'valid': False, 'details': ['User not found']}
+                continue
+
+            valid = True
+            details = []
+            for skill_id in skill_ids:
+                competency = Competency.query.filter_by(user_id=user.id, skill_id=skill_id).first()
+                if not competency or competency.needs_recycling:
+                    valid = False
+                    skill = Skill.query.get(skill_id)
+                    details.append(f'Not competent in {skill.name if skill else "Unknown skill"}')
+
+            result[email] = {'valid': valid, 'details': details}
+
+        return result
+
+@ns_public.route('/declare_practice')
+class PublicDeclarePractice(Resource):
+    @api.expect(declare_practice_public_payload)
+    @service_token_required
+    def post(self):
+        """Declare practice for a user"""
+        data = api.payload
+        email = data['email']
+        skill_ids = data['skill_ids']
+        date = datetime.strptime(data['date'], '%Y-%m-%d').date()
+        source = data['source']
+
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            api.abort(404, "User not found")
+
+        practice_date = datetime.combine(date, datetime.min.time(), tzinfo=timezone.utc)
+
+        for skill_id in skill_ids:
+            skill = Skill.query.get(skill_id)
+            if skill:
+                practice_event = SkillPracticeEvent(
+                    user=user,
+                    practice_date=practice_date,
+                    notes=f'Practice declared from {source}'
+                )
+                practice_event.skills.append(skill)
+                db.session.add(practice_event)
+
+        db.session.commit()
+        return {'message': 'Practice declared successfully'}, 201
+
+@ns_public.route('/user_calendar')
+class PublicUserCalendar(Resource):
+    @service_token_required
+    def get(self):
+        """Get user's training calendar"""
+        email = request.args.get('email')
+        if not email:
+            api.abort(400, "Email parameter required")
+
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return []
+
+        # Get training sessions where user is attendee or tutor
+        sessions = TrainingSession.query.filter(
+            (TrainingSession.attendees.any(User.id == user.id)) |
+            (TrainingSession.tutor_id == user.id)
+        ).all()
+
+        events = []
+        for session in sessions:
+            events.append({
+                'title': session.title,
+                'start': session.start_time.isoformat(),
+                'end': session.end_time.isoformat(),
+                'color': '#8B4513'  # Brown for training events
+            })
+
+        return events
+
+# Register namespaces
+api.add_namespace(ns_users)
+api.add_namespace(ns_tutors)
+api.add_namespace(ns_teams)
+api.add_namespace(ns_species)
+api.add_namespace(ns_skills)
+api.add_namespace(ns_training_paths)
+api.add_namespace(ns_training_sessions)
+api.add_namespace(ns_competencies)
+api.add_namespace(ns_skill_practice_events)
+api.add_namespace(ns_training_requests)
+api.add_namespace(ns_external_trainings)
+api.add_namespace(ns_public)

@@ -1,0 +1,29 @@
+<div class="modal-body">
+    <form id="training-request-form" method="POST">
+        {{ form.hidden_tag() }}
+        <div class="mb-3">
+            {{ form.species.label(class="form-label") }}
+            {{ form.species(class="form-control") }}
+            {% for error in form.species.errors %}
+                <span class="text-danger">{{ error }}</span>
+            {% endfor %}
+        </div>
+        <div class="mb-3">
+            {{ form.skills_requested.label(class="form-label") }}
+            {{ form.skills_requested(class="form-control") }}
+            {% for error in form.skills_requested.errors %}
+                <span class="text-danger">{{ error }}</span>
+            {% endfor %}
+        </div>
+        <div class="mb-3">
+            {{ form.justification.label(class="form-label") }}
+            {{ form.justification(class="form-control") }}
+            {% for error in form.justification.errors %}
+                <span class="text-danger">{{ error }}</span>
+            {% endfor %}
+        </div>
+
+
+        <input type="hidden" id="api_key" value="{{ api_key }}">
+    </form>
+</div>

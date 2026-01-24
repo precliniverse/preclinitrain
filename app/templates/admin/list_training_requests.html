@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <h1 class="mb-4">Demandes de Formation en Attente</h1>
+
+    <div class="mb-3">
+        <button id="create-session-from-selected-btn" class="btn btn-success" disabled>
+            Créer une session à partir des sélectionnées
+        </button>
+    </div>
+
+    {% if requests_by_species %}
+        {% for species, requests in requests_by_species.items() %}
+            <div class="card shadow mb-4">
+                <div class="card-header py-3 d-flex flex-row align-items-center justify-content-between">
+                    <h6 class="m-0 font-weight-bold text-primary">Espèce : {{ species.name }}</h6>
+                    {% with user_ids = requests|map(attribute='requester_id')|unique|join(',') %}
+                    {% with skill_ids = requests|map(attribute='skills_requested')|sum(start=[])|map(attribute='id')|unique|join(',') %}
+                        <a href="{{ url_for('admin.create_training_session', species_id=species.id, user_ids=user_ids, skill_ids=skill_ids) }}" class="btn btn-primary btn-sm">
+                            Créer une session pour {{ species.name }}
+                        </a>
+                    {% endwith %}
+                    {% endwith %}
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-bordered" width="100%" cellspacing="0">
+                            <thead>
+                                <tr>
+                                    <th><input type="checkbox" class="select-all-requests"></th>
+                                    <th>ID</th>
+                                    <th>Demandeur</th>
+                                    <th>Compétences Demandées</th>
+                                    <th>Justification</th>
+                                    <th>Date de Demande</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for req in requests %}
+                                <tr data-request-id="{{ req.id }}">
+                                    <td><input type="checkbox" class="select-request-checkbox"></td>
+                                    <td>{{ req.id }}</td>
+                                    <td>{{ req.requester.full_name }}</td>
+                                    <td>
+                                        {% for skill in req.skills_requested %}
+                                            <span class="badge bg-info">{{ skill.name }}</span>
+                                        {% endfor %}
+                                    </td>
+                                    <td>
+                                        {{ req.justification }}
+                                    </td>
+                                    <td>{{ req.request_date.strftime('%Y-%m-%d') }}</td>
+                                    <td>
+                                        <button class="btn btn-sm btn-danger reject-training-request-btn" data-request-id="{{ req.id }}" title="Rejeter"><i class="fas fa-times"></i></button>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    {% else %}
+        <div class="alert alert-info">Aucune demande de formation en attente.</div>
+    {% endif %}
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+$(document).ready(function() {
+    const createSessionBtn = $('#create-session-from-selected-btn');
+
+    function updateCreateSessionButtonState() {
+        const checkedCheckboxes = $('.select-request-checkbox:checked');
+        if (checkedCheckboxes.length > 0) {
+            createSessionBtn.prop('disabled', false);
+        } else {
+            createSessionBtn.prop('disabled', true);
+        }
+    }
+
+    // Handle individual checkbox clicks
+    $(document).on('change', '.select-request-checkbox', function() {
+        updateCreateSessionButtonState();
+    });
+
+    // Handle "Select All" checkbox clicks
+    $(document).on('change', '.select-all-requests', function() {
+        const isChecked = $(this).prop('checked');
+        $(this).closest('table').find('.select-request-checkbox').prop('checked', isChecked);
+        updateCreateSessionButtonState();
+    });
+
+    // Handle "Create Session from Selected" button click
+    createSessionBtn.on('click', function() {
+        const selectedRequestIds = [];
+        $('.select-request-checkbox:checked').each(function() {
+            selectedRequestIds.push($(this).closest('tr').data('request-id'));
+        });
+
+        if (selectedRequestIds.length > 0) {
+            const requestIdsParam = selectedRequestIds.join(',');
+            window.location.href = "{{ url_for('admin.create_training_session') }}?request_ids=" + requestIdsParam;
+        } else {
+            alert('Veuillez sélectionner au moins une demande de formation.');
+        }
+    });
+
+    // Handle AJAX rejection for training requests
+    $('.reject-training-request-btn').on('click', function() {
+        var button = $(this);
+        var requestId = button.data('request-id');
+        var rejectUrl = "{{ url_for('admin.reject_training_request', request_id=0) }}".replace('0', requestId);
+        var csrfToken = $('meta[name="csrf-token"]').attr('content');
+
+        if (confirm('Êtes-vous sûr de vouloir rejeter cette demande de formation ?')) {
+            fetch(rejectUrl, {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRFToken': csrfToken
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Remove the row from the table
+                    button.closest('tr').remove();
+                    alert(data.message);
+                    updateCreateSessionButtonState(); // Update button state after removal
+                } else {
+                    alert('Erreur lors du rejet : ' + (data.message || 'Erreur inconnue.'));
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Une erreur réseau est survenue.');
+            });
+        }
+    });
+});
+</script>
+{% endblock %}

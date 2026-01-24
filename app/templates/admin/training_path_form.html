@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+
+{% block styles %}
+{{ super() }}
+<link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+<style>
+    .sortable-placeholder {
+        height: 50px;
+        background-color: #f0f0f0;
+        border: 2px dashed #ccc;
+        margin-bottom: 10px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+    <h1>{{ title }}</h1>
+
+    <form method="post" novalidate>
+        {{ form.hidden_tag() }}
+        {{ form.skills_json }}
+
+        <div class="form-group">
+            {{ form.name.label(class="form-label") }}
+            {{ form.name(class="form-control") }}
+            {% for error in form.name.errors %}
+                <span class="text-danger">{{ error }}</span>
+            {% endfor %}
+        </div>
+
+        <div class="form-group mt-3">
+            {{ form.description.label(class="form-label") }}
+            {{ form.description(class="form-control", rows=3) }}
+            {% for error in form.description.errors %}
+                <span class="text-danger">{{ error }}</span>
+            {% endfor %}
+        </div>
+
+        <div class="form-group mt-3">
+            {{ form.species.label(class="form-label") }}
+            {{ form.species(class="form-control") }}
+            {% for error in form.species.errors %}
+                <span class="text-danger">{{ error }}</span>
+            {% endfor %}
+        </div>
+
+        <h3 class="mt-4">Skills in this Path</h3>
+        <div id="skills-container" class="list-group mb-3">
+            <!-- Selected skills will be dynamically added here -->
+        </div>
+
+        <div class="form-group">
+            <label for="skill-select">Add a skill</label>
+            <select id="skill-select" class="form-control"></select>
+        </div>
+
+        <div class="mt-4">
+            {{ form.submit(class="btn btn-primary") }}
+            <a href="{{ url_for('admin.manage_training_paths') }}" class="btn btn-secondary">Cancel</a>
+        </div>
+    </form>
+
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+<script>
+$(document).ready(function() {
+    const skillsContainer = document.getElementById('skills-container');
+    const skillsJsonInput = $('#skills_json');
+    let selectedSkills = [];
+
+    // Initialize SortableJS
+    new Sortable(skillsContainer, {
+        animation: 150,
+        ghostClass: 'sortable-placeholder',
+        onUpdate: function () {
+            updateSkillsJson();
+        }
+    });
+
+    // Initialize Select2 for the species field
+    const speciesSelect = $('#species').select2({
+        placeholder: "Select a Species",
+        allowClear: true
+    });
+
+    // Initialize Select2 for skill search (MOVED HERE)
+    const skillSelect = $('#skill-select').select2({
+        placeholder: 'Search for a skill to add',
+        allowClear: true,
+        ajax: {
+            url: function() {
+                const selectedSpeciesId = speciesSelect.val();
+                if (selectedSpeciesId) {
+                    return `/api/species/${selectedSpeciesId}/skills`;
+                } else {
+                    return "{{ url_for('api.skills_skill_list_resource') }}";
+                }
+            },
+            headers: {
+                'X-API-Key': '{{ api_key }}'
+            },
+            dataType: 'json',
+            delay: 250,
+            data: function (params) {
+                return { q: params.term };
+            },
+            processResults: function (data) {
+                // Filter out skills that are already selected
+                const filteredData = data.filter(skill => !selectedSkills.some(s => s.skill_id == skill.id));
+                const mappedData = filteredData.map(skill => ({ id: skill.id, text: skill.name }));
+                return { results: mappedData };
+            },
+            cache: true
+            },
+            minimumInputLength: 0 // Allow searching with no input
+    });
+
+    // Function to load skills based on species
+    function loadSkillsForSpecies(speciesId) {
+        const skillSelectData = skillSelect.data('select2');
+        if (!skillSelectData) return; // Ensure Select2 is initialized
+
+        if (!speciesId) {
+            // If no species selected, clear skillSelect and set URL to fallback
+            skillSelectData.options.set('ajax.url', "{{ url_for('admin.api_skills') }}");
+            skillSelect.val(null).trigger('change'); // Clear selected value
+            skillSelect.empty(); // Clear options
+            return;
+        }
+
+        // Update the URL for skillSelect's AJAX calls
+        skillSelectData.options.set('ajax.url', `/api/species/${speciesId}/skills`);
+        
+        // Clear current selection and options, then trigger a re-fetch
+        skillSelect.val(null).trigger('change'); // Clear selected value
+        skillSelect.empty(); // Clear options
+        
+        // Trigger a query to refresh the results based on the new URL
+        // This will make Select2 fetch data using the updated ajax.url
+        // We open and close to force a refresh of the results without user interaction
+        skillSelect.select2('open');
+        skillSelect.select2('close');
+
+        // Remove selected skills that are no longer valid for the new species
+        // This part remains the same as it deals with `selectedSkills` array and `skillsContainer`
+        $.ajax({
+            url: skillSelectData.options.get('ajax.url'),
+            headers: {
+                'X-API-Key': '{{ api_key }}'
+            },
+            dataType: 'json',
+            data: { q: '' }, // Fetch all skills for the current species
+            success: function(data) {
+                const validSkillIds = new Set(data.map(s => s.id));
+                const skillsToRemove = selectedSkills.filter(s => !validSkillIds.has(s.skill_id));
+
+                if (skillsToRemove.length > 0) {
+                    alert('Some selected skills are not valid for the new species and have been removed.');
+                }
+
+                skillsToRemove.forEach(skill => {
+                    selectedSkills = selectedSkills.filter(s => s.skill_id != skill.skill_id);
+                    $(`[data-skill-id=${skill.skill_id}]`).remove();
+                });
+                updateSkillsJson();
+            },
+            error: function(jqXHR, textStatus, errorThrown) {
+                console.error("Error validating selected skills:", textStatus, errorThrown);
+            }
+        });
+    }
+
+    // Handle species selection change
+    speciesSelect.on('change', function() {
+        const selectedSpeciesId = $(this).val();
+        loadSkillsForSpecies(selectedSpeciesId);
+    });
+
+    // Initial load of skills if a species is already selected (e.g., on edit page)
+    const initialSpeciesId = speciesSelect.val();
+    if (initialSpeciesId) {
+        loadSkillsForSpecies(initialSpeciesId);
+    }
+
+    // Handle skill selection
+    skillSelect.on('select2:select', function (e) {
+        const skillData = e.params.data;
+        addSkillToList(skillData.id, skillData.text);
+        skillSelect.val(null).trigger('change'); // Clear the select2
+    });
+
+    skillSelect.on('select2:open', function (e) {
+        document.querySelector('.select2-search__field').focus();
+    });
+
+    // Function to add a skill to the visual list
+    function addSkillToList(skillId, skillName) {
+        // Check for duplicates before adding
+        if (selectedSkills.some(s => s.skill_id == skillId)) {
+            alert('Skill already added.');
+            return;
+        }
+
+        const skill = {
+            skill_id: skillId,
+            name: skillName
+        };
+        selectedSkills.push(skill);
+
+        const item = document.createElement('div');
+        item.className = 'list-group-item d-flex justify-content-between align-items-center';
+        item.dataset.skillId = skillId;
+
+        item.innerHTML = `
+            <div class="d-flex align-items-center w-100">
+                <h5 class="mb-0 me-3">${skillName}</h5>
+            </div>
+            <button type="button" class="btn btn-danger btn-sm remove-skill-btn ms-3">&times;</button>
+        `;
+
+        skillsContainer.appendChild(item);
+        updateSkillsJson();
+    }
+
+    // Handle skill removal
+    $(skillsContainer).on('click', '.remove-skill-btn', function() {
+        const item = $(this).closest('.list-group-item');
+        const skillId = item.data('skill-id');
+        selectedSkills = selectedSkills.filter(s => s.skill_id != skillId);
+        item.remove();
+        updateSkillsJson();
+    });
+
+    // Function to update the hidden JSON input
+    function updateSkillsJson() {
+        const skillElements = Array.from(skillsContainer.children);
+        const orderedSkills = skillElements.map((item, index) => {
+            const skillId = $(item).data('skill-id');
+            return {
+                skill_id: skillId,
+                order: index
+            };
+        });
+        skillsJsonInput.val(JSON.stringify(orderedSkills));
+    }
+
+    // Pre-populate form if editing
+    const initialSkillsData = JSON.parse('{{ form.skills_json.data | safe }}');
+    if (initialSkillsData.length > 0) {
+        initialSkillsData.sort((a, b) => a.order - b.order);
+        initialSkillsData.forEach(skillData => {
+            // skillData now contains skill_id and name from the backend
+            addSkillToList(skillData.skill_id, skillData.name);
+        });
+    }
+});
+</script>
+{% endblock %}

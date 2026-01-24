@@ -1,0 +1,25 @@
+flask
+flask-sqlalchemy
+flask-migrate
+flask-login
+flask-babel
+flask-restx
+flask-bootstrap
+marshmallow
+PyMySQL
+python-dotenv
+flask-mail
+ics
+openpyxl
+gunicorn; sys_platform != 'win32'
+waitress; sys_platform == 'win32'
+Flask-Testing
+Flask-WTF
+WTForms-SQLAlchemy
+email_validator
+Faker
+fpdf2
+requests
+Flask-Limiter
+itsdangerous
+rich

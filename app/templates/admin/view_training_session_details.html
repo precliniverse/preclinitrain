@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <h1 class="mb-4">Détails de la Session de Formation</h1>
+
+    <div class="card shadow mb-4">
+        <div class="card-header py-3">
+            <h6 class="m-0 font-weight-bold text-primary">{{ session.title }}</h6>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-6">
+                    <p><strong>Lieu :</strong> {{ session.location }}</p>
+                    <p><strong>Début :</strong> {{ session.start_time.strftime('%Y-%m-%d %H:%M') }}</p>
+                    <p><strong>Fin :</strong> {{ session.end_time.strftime('%Y-%m-%d %H:%M') }}</p>
+                    <p><strong>Tuteur(s) :</strong>
+                        {% if session.tutors %}
+                            {% for tutor in session.tutors %}
+                                <span class="badge bg-info text-dark">{{ tutor.full_name }}</span>{% if not loop.last %}, {% endif %}
+                            {% endfor %}
+                        {% else %}
+                            N/A
+                        {% endif %}
+                    </p>
+                </div>
+                <div class="col-md-6">
+                    <p><strong>Espèce Principale :</strong> {{ session.main_species.name if session.main_species else 'N/A' }}</p>
+                    <p><strong>ID Autorisation Éthique :</strong> {{ session.ethical_authorization_id if session.ethical_authorization_id else 'N/A' }}</p>
+                    <p><strong>Nombre d'animaux :</strong> {{ session.animal_count if session.animal_count else 'N/A' }}</p>
+                    {% if session.attachment_path %}
+                        <p><strong>Pièce jointe :</strong> <a href="{{ url_for('static', filename=session.attachment_path) }}" target="_blank">Voir la pièce jointe</a></p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <hr>
+
+            <h5>Participants :</h5>
+            {% if session.attendees %}
+                <ul class="list-group mb-3">
+                    {% for attendee in session.attendees %}
+                        <li class="list-group-item">{{ attendee.full_name }} ({{ attendee.email }})</li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>Aucun participant enregistré.</p>
+            {% endif %}
+
+            <h5>Compétences Couvertes :</h5>
+            {% if session.skills_covered %}
+                <ul class="list-group mb-3">
+                    {% for skill in session.skills_covered %}
+                        <li class="list-group-item">{{ skill.name }}</li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>Aucune compétence couverte.</p>
+            {% endif %}
+
+            {% if not read_only %}
+            <div class="mt-4">
+                <a href="{{ url_for('admin.validate_training_session', session_id=session.id) }}" class="btn btn-primary">Valider la Session</a>
+            </div>
+            {% endif %}
+
+            {% if read_only %}
+            <a href="{{ url_for('dashboard.user_profile') }}" class="btn btn-secondary mt-3">Retour au profil</a>
+            {% else %}
+            <a href="{{ url_for('admin.manage_training_sessions') }}" class="btn btn-secondary mt-3">Retour à la liste des sessions</a>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}
