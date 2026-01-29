@@ -135,20 +135,23 @@ def create_app(config_class=Config):
     app.logger.addHandler(file_handler)
 
     # Configure email logging for ERROR level
-    if not app.debug and app.config['MAIL_SERVER']:
+    if not app.debug and app.config.get('MAIL_ENABLED') and app.config['ADMINS']:
         auth = None
         if app.config['MAIL_USERNAME'] or app.config['MAIL_PASSWORD']:
             auth = (app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
         secure = None
         if app.config['MAIL_USE_TLS']:
             secure = ()
-        mail_handler = SMTPHandler(
-            mailhost=(app.config['MAIL_SERVER'], app.config['MAIL_PORT']),
-            fromaddr='no-reply@' + app.config['MAIL_SERVER'],
-            toaddrs=app.config['ADMINS'], subject='PrecliniTrain Failure',
-            credentials=auth, secure=secure)
-        mail_handler.setLevel(logging.ERROR)
-        app.logger.addHandler(mail_handler)
+        try:
+            mail_handler = SMTPHandler(
+                mailhost=(app.config['MAIL_SERVER'], app.config['MAIL_PORT']),
+                fromaddr='no-reply@' + app.config['MAIL_SERVER'],
+                toaddrs=app.config['ADMINS'], subject='PrecliniTrain Failure',
+                credentials=auth, secure=secure)
+            mail_handler.setLevel(logging.ERROR)
+            app.logger.addHandler(mail_handler)
+        except Exception as e:
+            app.logger.warning(f"Could not initialize SMTP logging: {e}")
 
     # ensure the instance folder exists
     try:
@@ -180,6 +183,61 @@ def create_app(config_class=Config):
     @app.context_processor
     def inject_version():
         return dict(app_version=current_app.config.get('VERSION', '1.0.0'))
+
+    # Load models eagerly for context processor logic if needed, 
+    # but we can import inside function to be safe.
+    
+    @app.before_request
+    def load_current_facility():
+        if current_user.is_authenticated:
+            # Check if facility_id is in session
+            facility_id = session.get('current_facility_id')
+            
+            # Import models here to avoid circular imports if any
+            from app.models import Facility, UserFacilityRole
+            
+            if facility_id:
+                # Verify user handles access to this facility
+                # We check directly in DB to be secure
+                ufr = UserFacilityRole.query.filter_by(
+                    user_id=current_user.id, 
+                    facility_id=facility_id,
+                    is_approved=True
+                ).first()
+                
+                if ufr:
+                    g.current_facility = ufr.facility
+                    g.current_role = ufr.role # Store current role for easy access
+                else:
+                    # Invalid facility in session (maybe access revoked), clear it
+                    session.pop('current_facility_id', None)
+                    g.current_facility = None
+                    g.current_role = None
+            else:
+                 g.current_facility = None
+                 g.current_role = None
+
+            # If no current facility, try to set a default one
+            if not g.current_facility:
+                # Get the first approved facility
+                first_ufr = UserFacilityRole.query.filter_by(
+                    user_id=current_user.id,
+                    is_approved=True
+                ).first()
+                if first_ufr:
+                    session['current_facility_id'] = first_ufr.facility_id
+                    g.current_facility = first_ufr.facility
+                    g.current_role = first_ufr.role
+        else:
+            g.current_facility = None
+            g.current_role = None
+
+    @app.context_processor
+    def inject_current_facility():
+        return dict(
+            current_facility=getattr(g, 'current_facility', None),
+            current_role=getattr(g, 'current_role', None)
+        )
 
     @app.template_filter('get_skill_name')
     def get_skill_name_filter(skill_id):

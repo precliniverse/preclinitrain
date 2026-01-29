@@ -14,6 +14,9 @@
                             <tr>
                                 <th>Utilisateur</th>
                                 <th>Événement de Formation</th>
+                                {% if not current_facility %}
+                                <th>Installation</th>
+                                {% endif %}
                                 <th>Date de l'événement</th>
                                 <th>Attestation de Présence</th>
                                 <th>Heures Validées</th>
@@ -26,6 +29,9 @@
                                 <tr>
                                     <td>{{ entry_form.user_full_name.data }}</td>
                                     <td>{{ entry_form.event_title.data }}</td>
+                                    {% if not current_facility %}
+                                    <td>{{ entry_form.object_data.event.facility.name if entry_form.object_data.event.facility else 'Global' }}</td>
+                                    {% endif %}
                                     <td>{{ entry_form.event_date.data }}</td>
                                     <td>
                                         {% if entry_form.attendance_attachment_path.data %}

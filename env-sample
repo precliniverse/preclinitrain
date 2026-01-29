@@ -68,13 +68,29 @@ DB_PASSWORD=your_db_password
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=a_strong_password_here
 
-# Email Configuration (Example for a generic SMTP server)
-# Used for sending emails (e.g., new user registrations, password resets).
+# Email Configuration (SMTP)
+# Used for sending emails (e.g., password resets, training reminders).
+# If MAIL_SERVER is empty or not set, email features will be disabled.
+
+# MAIL_SERVER: The SMTP server to use (e.g., smtp.gmail.com, smtp.office365.com).
+# Leave empty to disable email functionality.
 MAIL_SERVER=smtp.example.com
+
+# MAIL_PORT: The SMTP port (usually 587 for STARTTLS or 465 for SSL).
 MAIL_PORT=587
+
+# MAIL_USE_TLS: Set to True to use STARTTLS security.
 MAIL_USE_TLS=True
+
+# MAIL_USERNAME: Your SMTP account username (usually your email address).
 MAIL_USERNAME=your_email@example.com
+
+# MAIL_PASSWORD: Your SMTP account password or app-specific password.
 MAIL_PASSWORD=your_email_password
+
+# MAIL_DEFAULT_SENDER: The 'From' address for system emails.
+# Defaults to MAIL_USERNAME if not set.
+# MAIL_DEFAULT_SENDER=no-reply@example.com
 
 # ADMIN_EMAILS: Comma-separated list of email addresses for admin notifications.
 # Example: ADMIN_EMAILS=admin1@example.com,admin2@example.com

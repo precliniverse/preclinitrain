@@ -33,11 +33,15 @@ class Config:
 
     MAX_CONTENT_LENGTH = 16 * 1000 * 1000  # 16 MB upload limit
 
-    MAIL_SERVER = os.environ.get('MAIL_SERVER') or 'localhost' # Default to localhost
-    MAIL_PORT = int(os.environ.get('MAIL_PORT') or 25)
-    MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS') is not None
+    MAIL_SERVER = os.environ.get('MAIL_SERVER') # Removed default 'localhost'
+    MAIL_PORT = int(os.environ.get('MAIL_PORT') or 587) # Default to 587 (TLS)
+    MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
     MAIL_USERNAME = os.environ.get('MAIL_USERNAME') or None # Keep None if not set
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD') or None # Keep None if not set
+    MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER') or os.environ.get('MAIL_USERNAME')
+
+    # Flag to check if mail is enabled
+    MAIL_ENABLED = bool(MAIL_SERVER)
     
     # ADMINS should be a list of email addresses
     ADMINS = [email.strip() for email in os.environ.get('ADMIN_EMAILS', '').split(',') if email.strip()]

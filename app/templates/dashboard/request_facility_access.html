@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <h1>{{ _('Request Facility Access') }}</h1>
+    <p>{{ _('Select a facility to request access to.') }}</p>
+
+    <div class="row">
+        <div class="col-md-6">
+            {% if available_facilities %}
+                <form action="" method="post">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <div class="mb-3">
+                        <label for="facility_id" class="form-label">{{ _('Facility') }}</label>
+                        <select class="form-select" id="facility_id" name="facility_id" required>
+                            <option value="">{{ _('Select a facility') }}</option>
+                            {% for facility in available_facilities %}
+                                <option value="{{ facility.id }}">{{ facility.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">{{ _('Request Access') }}</button>
+                    <a href="{{ url_for('dashboard.edit_profile') }}" class="btn btn-secondary">{{ _('Cancel') }}</a>
+                </form>
+            {% else %}
+                <div class="alert alert-info">
+                    {{ _('You already have access (or pending requests) to all available facilities.') }}
+                </div>
+                <a href="{{ url_for('dashboard.edit_profile') }}" class="btn btn-secondary">{{ _('Back') }}</a>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

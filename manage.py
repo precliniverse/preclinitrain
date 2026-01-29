@@ -540,10 +540,11 @@ def setup_env_file():
             setup_external_database(config)
 
     # Email configuration
-    print("\n--- Email Configuration ---")
-    configure_email = input("Configure email settings? (y/N): ").strip().lower()
+    print("\n--- Email Configuration (Optional) ---")
+    print("Used for password resets and system notifications.")
+    configure_email = input("Configure SMTP settings now? (y/N): ").strip().lower()
     if configure_email == 'y':
-        mail_server = input("Mail server [smtp.example.com]: ").strip() or "smtp.example.com"
+        mail_server = input("Mail server [smtp.gmail.com]: ").strip() or "smtp.gmail.com"
         mail_port = input("Mail port [587]: ").strip() or "587"
         mail_use_tls = input("Use TLS? (True/False) [True]: ").strip() or "True"
         mail_username = input("Mail username: ").strip()
@@ -554,6 +555,10 @@ def setup_env_file():
         config['MAIL_USE_TLS'] = mail_use_tls
         config['MAIL_USERNAME'] = mail_username
         config['MAIL_PASSWORD'] = mail_password
+    else:
+        # If not configuring, ensure MAIL_SERVER is empty to disable mail
+        config['MAIL_SERVER'] = ''
+        Colors.info("SMTP disabled. You can configure it later in .env")
 
     # Precliniverse Integration
     print("\n--- Precliniverse Integration ---")

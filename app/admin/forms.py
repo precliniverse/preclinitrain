@@ -18,7 +18,8 @@ from flask_babel import lazy_gettext as _
 from app import db
 from app.models import (
     User, Team, Species, Skill, Complexity, TrainingPath, Role, Permission,
-    ContinuousTrainingType, InitialRegulatoryTrainingLevel, UserContinuousTrainingStatus
+    ContinuousTrainingType, InitialRegulatoryTrainingLevel, UserContinuousTrainingStatus,
+    Facility
 )
 
 def get_teams():
@@ -283,3 +284,21 @@ class BatchValidateUserContinuousTrainingForm(FlaskForm):
     """Form for batch validating continuous training entries."""
     entries = FieldList(FormField(ValidateUserContinuousTrainingEntryForm))
     submit_batch = SubmitField(_('Validate Selection'))
+
+class FacilityForm(FlaskForm):
+    """Form for creating and editing facilities."""
+    name = StringField(_('Facility Name'), validators=[DataRequired(), Length(min=2, max=128)])
+    description = TextAreaField(_('Description'), validators=[Optional()])
+    address = StringField(_('Address'), validators=[Optional(), Length(max=256)])
+    submit = SubmitField(_('Save Facility'))
+
+    def __init__(self, original_name=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.original_name = original_name
+
+    def validate_name(self, name):
+        """Validates that the facility name is not already in use."""
+        if name.data != self.original_name:
+            facility = Facility.query.filter_by(name=self.name.data).first()
+            if facility:
+                raise ValidationError(_('That facility name is already in use. Please choose a different name.'))

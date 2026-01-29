@@ -35,6 +35,13 @@
                     <span class="text-danger">{{ error }}</span>
                     {% endfor %}
                 </div>
+                <div class="mb-3">
+                    {{ form.facilities.label(class="form-label") }}
+                    {{ form.facilities(class="form-control", id="facilities", multiple="multiple") }}
+                    {% for error in form.facilities.errors %}
+                    <span class="text-danger">{{ error }}</span>
+                    {% endfor %}
+                </div>
                 {{ form.submit(class="btn btn-primary") }}
             </form>
         </div>

@@ -80,27 +80,47 @@ def create_demo_data_command():
 
     db.session.commit()
 
+    # Create a Default Facility
+    from app.models import Facility, UserFacilityRole
+    main_lab = get_or_create(Facility, name='Main Research Lab', description='Primary animal facility')
+    print(f"Facility created: {main_lab.name}")
+
+    db.session.commit()
+
     # Assign Teams
     if oncology not in mouse_user.teams:
         mouse_user.teams.append(oncology)
     if neuro not in rat_user.teams:
         rat_user.teams.append(neuro)
     
-    # Assign Roles
+    # Assign Roles via UserFacilityRole
+    user_role = Role.query.filter_by(name='Admin').first() # Ensure Admin role exists for Admin user
+    if not Role.query.filter_by(name='User').first():
+        init_roles_and_permissions()
+    
+    admin_role = Role.query.filter_by(name='Admin').first()
     user_role = Role.query.filter_by(name='User').first()
     tutor_role = Role.query.filter_by(name='Tutor').first()
-    
+
+    # Admin as Admin of Main Lab
+    if admin_role:
+        ufr = UserFacilityRole.query.filter_by(user=admin, facility=main_lab).first()
+        if not ufr:
+            ufr = UserFacilityRole(user=admin, facility=main_lab, role=admin_role, is_approved=True)
+            db.session.add(ufr)
+
+    # Users in Main Lab
     for user in [mouse_user, rat_user]:
-        if user_role and user_role not in user.roles:
-            user.roles.append(user_role)
+        ufr = UserFacilityRole.query.filter_by(user=user, facility=main_lab).first()
+        if not ufr:
+            ufr = UserFacilityRole(user=user, facility=main_lab, role=user_role, is_approved=True)
+            db.session.add(ufr)
 
-    # Make Admin a Tutor
-    if tutor_role and tutor_role not in admin.roles:
-        admin.roles.append(tutor_role)
-
-    # Make Alice a Tutor (Peer Tutor example)
-    if tutor_role and tutor_role not in mouse_user.roles:
-        mouse_user.roles.append(tutor_role)
+    # Make Alice a Tutor in Main Lab
+    if tutor_role:
+        ufr_alice = UserFacilityRole.query.filter_by(user=mouse_user, facility=main_lab).first()
+        if ufr_alice:
+            ufr_alice.role = tutor_role
     
     db.session.commit()
 
@@ -182,7 +202,8 @@ def create_demo_data_command():
             end_time=datetime.now(timezone.utc) - timedelta(days=60, hours=4),
             main_species=mouse,
             animal_count=10,
-            status='Validated'
+            status='Validated',
+            facility_id=main_lab.id
         )
         session.tutors.append(admin)
         # Alice attended
@@ -267,7 +288,8 @@ def create_demo_data_command():
             event_date=datetime.now(timezone.utc) - timedelta(days=30),
             duration_hours=7,
             creator=admin,
-            status=ContinuousTrainingEventStatus.APPROVED 
+            status=ContinuousTrainingEventStatus.APPROVED,
+            facility_id=main_lab.id
         )
         db.session.add(ethics_event)
 

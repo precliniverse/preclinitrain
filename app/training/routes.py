@@ -118,6 +118,10 @@ def _send_session_reminders(session):
     with open(ics_path, 'w') as f:
         f.writelines(c)
 
+    if not current_app.config.get('MAIL_ENABLED'):
+        flash(_('Email reminders are disabled as SMTP is not configured.'), 'warning')
+        return
+
     for attendee in session.attendees:
         msg = Message(f"Training Session Reminder: {session.title}",
                       sender=current_app.config['ADMINS'][0],
@@ -127,7 +131,7 @@ def _send_session_reminders(session):
         with current_app.open_resource(ics_path) as fp:
             msg.attach(ics_filename, "text/calendar", fp.read())
         mail.send(msg)
-    flash('Email reminders sent!', 'info')
+    flash(_('Email reminders sent!'), 'info')
 
 @bp.route('/requests/<int:request_id>/create_session', methods=['GET', 'POST'])
 @login_required
@@ -301,16 +305,19 @@ def create_session_from_requests():
                 with open(ics_path, 'w') as f:
                     f.writelines(c)
                 
-                for attendee in session.attendees:
-                    msg = Message(f"Training Session Reminder: {session.title}",
-                                  sender=current_app.config['ADMINS'][0],
-                                  recipients=[attendee.email])
-                    msg.body = render_template('email/training_session_reminder.txt', user=attendee, session=session)
-                    msg.html = render_template('email/training_session_reminder.html', user=attendee, session=session)
-                    with current_app.open_resource(ics_path) as fp:
-                        msg.attach(ics_filename, "text/calendar", fp.read())
-                    mail.send(msg)
-                flash('Email reminders sent!', 'info')
+                if not current_app.config.get('MAIL_ENABLED'):
+                    flash(_('Email reminders are disabled as SMTP is not configured.'), 'warning')
+                else:
+                    for attendee in session.attendees:
+                        msg = Message(f"Training Session Reminder: {session.title}",
+                                      sender=current_app.config['ADMINS'][0],
+                                      recipients=[attendee.email])
+                        msg.body = render_template('email/training_session_reminder.txt', user=attendee, session=session)
+                        msg.html = render_template('email/training_session_reminder.html', user=attendee, session=session)
+                        with current_app.open_resource(ics_path) as fp:
+                            msg.attach(ics_filename, "text/calendar", fp.read())
+                        mail.send(msg)
+                    flash(_('Email reminders sent!'), 'info')
 
             flash('Training session created successfully!', 'success')
             return redirect(url_for('training.list_training_requests'))

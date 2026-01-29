@@ -11,6 +11,9 @@
                 <th>ID</th>
                 <th>User</th>
                 <th>Trainer</th>
+                {% if not current_facility %}
+                <th>Installation</th>
+                {% endif %}
                 <th>Date</th>
                 <th>Claimed Skills & Details</th>
                 <th>Attachment</th>
@@ -24,6 +27,9 @@
                 <td>{{ training.id }}</td>
                 <td>{{ training.user.full_name }}</td>
                 <td>{{ training.external_trainer_name }}</td>
+                {% if not current_facility %}
+                <td>{{ training.facility.name if training.facility else 'Global' }}</td>
+                {% endif %}
                 <td>{{ training.date.strftime('%Y-%m-%d') }}</td>
                 <td>
                     <ul class="list-unstyled mb-0">

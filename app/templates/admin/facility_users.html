@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{{ url_for('admin.index') }}">{{ _('Admin') }}</a></li>
+                <li class="breadcrumb-item"><a href="{{ url_for('admin.manage_facilities') }}">{{ _('Facilities') }}</a></li>
+                <li class="breadcrumb-item active" aria-current="page">{{ facility.name }} - {{ _('Users') }}</li>
+            </ol>
+        </nav>
+
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1><i class="fas fa-users me-2"></i>{{ _('Users in %(name)s', name=facility.name) }}</h1>
+            <div class="btn-group">
+                <a href="{{ url_for('admin.edit_facility', facility_id=facility.id) }}" class="btn btn-outline-primary">
+                    <i class="fas fa-edit me-1"></i> {{ _('Edit Facility') }}
+                </a>
+            </div>
+        </div>
+
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover datatable">
+                        <thead class="table-light">
+                            <tr>
+                                <th>{{ _('Full Name') }}</th>
+                                <th>{{ _('Email') }}</th>
+                                <th>{{ _('Role in Facility') }}</th>
+                                <th>{{ _('Status') }}</th>
+                                <th class="text-end">{{ _('Actions') }}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for user, role, is_approved in users_with_roles %}
+                            <tr>
+                                <td><strong>{{ user.full_name }}</strong></td>
+                                <td>{{ user.email }}</td>
+                                <td><span class="badge bg-primary">{{ role.name }}</span></td>
+                                <td>
+                                    {% if is_approved %}
+                                        <span class="badge bg-success">{{ _('Approved') }}</span>
+                                    {% else %}
+                                        <span class="badge bg-warning text-dark">{{ _('Pending Approval') }}</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">
+                                    <a href="{{ url_for('admin.edit_user', item_id=user.id) }}" class="btn btn-sm btn-outline-primary" title="{{ _('Edit User') }}">
+                                        <i class="fas fa-user-edit"></i>
+                                    </a>
+                                    {% if not is_approved %}
+                                    <form action="{{ url_for('admin.approve_user', user_id=user.id, facility_id=facility.id) }}" method="POST" class="d-inline">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                        <button type="submit" class="btn btn-sm btn-success" title="{{ _('Approve Access') }}">
+                                            <i class="fas fa-check"></i>
+                                        </button>
+                                    </form>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+    $(document).ready(function() {
+        $('.datatable').DataTable({
+            "order": [[ 0, "asc" ]],
+            "pageLength": 25
+        });
+    });
+</script>
+{% endblock %}

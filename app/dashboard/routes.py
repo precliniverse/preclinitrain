@@ -2,6 +2,7 @@ from flask_babel import lazy_gettext as _
 import os
 import io
 import json
+import flask
 from flask import render_template, flash, redirect, url_for, current_app, request, send_file, abort, jsonify
 from flask_login import login_required, current_user, logout_user
 from werkzeug.utils import secure_filename
@@ -21,7 +22,7 @@ from app.models import (
     ContinuousTrainingEventStatus, Skill, ContinuousTrainingType, Competency, Role, Permission,
     InitialRegulatoryTraining, InitialRegulatoryTrainingLevel, SkillPracticeEvent, Species,
     UserDismissedNotification, tutor_skill_association, TrainingSession, ExternalTrainingSkillClaim,
-    training_session_attendees
+    training_session_attendees, UserFacilityRole
 )
 from app.profile.forms import (
     RequestContinuousTrainingEventForm, SubmitContinuousTrainingAttendanceForm, EditProfileForm,
@@ -164,13 +165,21 @@ def get_notification_summary_for_user(user):
 
     # Admin-focused notifications
     if user.can('user_manage') and 'user_approvals' not in dismissed_notifications:
-        pending_user_approvals_count = User.query.filter_by(is_approved=False).count()
+        current_facility = getattr(flask.g, 'current_facility', None)
+        if current_facility:
+            pending_user_approvals_count = UserFacilityRole.query.filter_by(
+                facility_id=current_facility.id,
+                is_approved=False
+            ).count()
+        else:
+            pending_user_approvals_count = UserFacilityRole.query.filter_by(is_approved=False).count()
+
         if pending_user_approvals_count > 0:
             notifications.append({
                 'type': 'user_approvals',
                 'title': 'New User Approvals',
                 'count': pending_user_approvals_count,
-                'url': url_for('admin.pending_users')
+                'url': url_for('admin.pending_users') # This route handles facility context
             })
             total_count += pending_user_approvals_count
 
@@ -520,15 +529,26 @@ def request_continuous_training_event():
             description=form.notes.data, # Map notes to description
             creator_id=current_user.id,
             status=ContinuousTrainingEventStatus.PENDING,
-            duration_hours=0.0 # Set to 0.0 initially, to be updated by validator
+            duration_hours=0.0, # Set to 0.0 initially, to be updated by validator
+            facility_id=getattr(flask.g, 'current_facility', None).id if getattr(flask.g, 'current_facility', None) else None
         )
         db.session.add(new_event)
         db.session.commit()
 
-        # Send email to continuous training managers
-        ct_managers = User.query.join(User.roles).join(Role.permissions).filter(
-            Permission.name == 'continuous_training_manage'
-        ).all()
+        # Send email to continuous training managers for THIS facility
+        current_facility = getattr(flask.g, 'current_facility', None)
+        if current_facility:
+            ct_managers = User.query.join(UserFacilityRole).join(Role).join(Role.permissions).filter(
+                UserFacilityRole.facility_id == current_facility.id,
+                Permission.name == 'continuous_training_manage',
+                UserFacilityRole.is_approved == True
+            ).all()
+        else:
+            # Fallback to all managers if no facility context
+            ct_managers = User.query.join(UserFacilityRole).join(Role).join(Role.permissions).filter(
+                Permission.name == 'continuous_training_manage',
+                UserFacilityRole.is_approved == True
+            ).all()
 
         if ct_managers:
             recipients = [manager.email for manager in ct_managers if manager.email]
@@ -795,6 +815,60 @@ def confirm_email(token):
         return redirect(url_for('root.index'))
 
 
+@bp.route('/request_facility_access', methods=['GET', 'POST'])
+@login_required
+def request_facility_access():
+    """Allows users to request access to additional facilities."""
+    from app.models import Facility, UserFacilityRole, Role
+    from app.email import send_email # Ensure send_email is imported
+    
+    # Get facilities user already has (any status)
+    user_facilities_ids = [r.facility_id for r in current_user.facility_roles]
+    
+    # Available facilities
+    available_facilities = Facility.query.filter(Facility.id.notin_(user_facilities_ids)).all()
+    
+    if request.method == 'POST':
+        facility_id = request.form.get('facility_id')
+        facility = Facility.query.get(facility_id)
+        
+        if facility and facility.id not in user_facilities_ids:
+            # Create pending role
+            default_role = Role.query.filter_by(name='User').first()
+            ufr = UserFacilityRole(user=current_user, facility=facility, role=default_role, is_approved=False)
+            db.session.add(ufr)
+            
+            # Notify Facility Admins
+            admin_role = Role.query.filter_by(name='Admin').first()
+            facility_admins = UserFacilityRole.query.filter_by(
+                facility_id=facility.id, 
+                role_id=admin_role.id,
+                is_approved=True
+            ).all()
+            
+            # Also notify Global Admins if no facility admins found (or always?)
+            # For now, just facility admins if they exist, or fallback to global admins?
+            # UserFacilityRole logic implies admins are per facility.
+            
+            recipients = [ufr_admin.user.email for ufr_admin in facility_admins]
+            
+            if recipients:
+                send_email(f'[PrecliniTrain] User Request for {facility.name}',
+                           sender=current_app.config['MAIL_USERNAME'],
+                           recipients=recipients,
+                           text_body=render_template('email/admin_new_registration.txt', user=current_user, facility=facility),
+                           html_body=render_template('email/admin_new_registration.html', user=current_user, facility=facility))
+
+            db.session.commit()
+            flash(_('Request for %(name)s sent successfully.', name=facility.name), 'success')
+        else:
+            flash(_('Invalid facility selected.'), 'danger')
+            
+        return redirect(url_for('dashboard.edit_profile'))
+
+    return render_template('dashboard/request_facility_access.html', available_facilities=available_facilities)
+
+
 @bp.route('/request-training', methods=['GET', 'POST'])
 @login_required
 @permission_required('self_submit_training_request')
@@ -854,7 +928,8 @@ def submit_training_request():
             req = TrainingRequest(
                 requester=current_user,
                 status=TrainingRequestStatus.PENDING,
-                justification=form.justification.data
+                justification=form.justification.data,
+                facility_id=getattr(flask.g, 'current_facility', None).id if getattr(flask.g, 'current_facility', None) else None
             )
             db.session.add(req)
             
@@ -917,13 +992,17 @@ def propose_skill():
         req = TrainingRequest(
             requester=current_user,
             status=TrainingRequestStatus.PROPOSED_SKILL,
-            justification=f"Proposed Skill: {form.name.data} - Description: {form.description.data}")
+            justification=f"Proposed Skill: {form.name.data} - Description: {form.description.data}",
+            facility_id=getattr(flask.g, 'current_facility', None).id if getattr(flask.g, 'current_facility', None) else None
+        )
         db.session.add(req)
         db.session.commit()
 
-        # Send email to skill managers
-        skill_managers = User.query.join(User.roles).join(Role.permissions).filter(
-            Permission.name == 'skill_manage'
+        # Send email to skill managers (Global)
+        from app.models import UserFacilityRole
+        skill_managers = User.query.join(UserFacilityRole).join(Role).join(Role.permissions).filter(
+            Permission.name == 'skill_manage',
+            UserFacilityRole.is_approved == True
         ).all()
         
         if skill_managers:
@@ -974,7 +1053,8 @@ def submit_external_training():
             external_trainer_name=form.external_trainer_name.data,
             date=form.date.data,
             duration_hours=form.duration_hours.data,
-            status=ExternalTrainingStatus.PENDING
+            status=ExternalTrainingStatus.PENDING,
+            facility_id=getattr(flask.g, 'current_facility', None).id if getattr(flask.g, 'current_facility', None) else None
         )
         if form.attachment.data:
             content_type = "external_training"

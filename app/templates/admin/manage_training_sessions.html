@@ -23,6 +23,9 @@
                             <th>Participants</th>
                             <th>Compétences Couvertes</th>
                             <th>Espèce(s)</th>
+                            {% if not current_facility %}
+                            <th>Installation</th>
+                            {% endif %}
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -45,6 +48,9 @@
                             <td>{{ session.attendees|length }}</td>
                             <td>{{ session.skills_covered|length }}</td>
                             <td>{{ session.main_species.name if session.main_species else 'N/A' }}</td>
+                            {% if not current_facility %}
+                            <td>{{ session.facility.name if session.facility else 'Globall' }}</td>
+                            {% endif %}
                             <td>
                                 <a href="{{ url_for('admin.view_training_session_details', session_id=session.id) }}" class="btn btn-sm btn-info" title="Voir détails"><i class="fa fa-eye"></i></a>
                                 <a href="{{ url_for('admin.edit_training_session', session_id=session.id) }}" class="btn btn-sm btn-warning" title="Éditer"><i class="fa fa-edit"></i></a>

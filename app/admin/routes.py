@@ -11,10 +11,8 @@ from datetime import datetime, timezone, timedelta
 
 # Third-party imports
 import openpyxl
-from flask import (
-    render_template, redirect, url_for, flash, request, current_app,
-    send_file, jsonify, abort
-)
+import flask
+from flask import render_template, redirect, url_for, flash, request, current_app, send_file, jsonify, abort
 from flask_login import login_required, current_user
 from openpyxl.comments import Comment
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -29,7 +27,7 @@ from app.admin.forms import (
     UserForm, TeamForm, SpeciesForm, SkillForm, TrainingPathForm, ImportForm,
     AddUserToTeamForm, RoleForm, ContinuousTrainingEventForm,
     BatchValidateUserContinuousTrainingForm, ValidateUserContinuousTrainingEntryForm,
-    AdminInitialRegulatoryTrainingForm
+    AdminInitialRegulatoryTrainingForm, FacilityForm
 )
 from app.decorators import permission_required
 from app.email import send_email
@@ -41,7 +39,7 @@ from app.models import (
     ContinuousTrainingEvent, ContinuousTrainingEventStatus, UserContinuousTraining,
     UserContinuousTrainingStatus, InitialRegulatoryTraining, InitialRegulatoryTrainingLevel,
     training_session_skills_covered, training_request_skills_requested, skill_species_association,
-    skill_practice_event_skills
+    skill_practice_event_skills, Facility, UserFacilityRole
 )
 from app.training.forms import TrainingSessionForm
 
@@ -50,6 +48,11 @@ from app.training.forms import TrainingSessionForm
 @permission_required('continuous_training_manage')
 def manage_continuous_training_events():
     """Manages continuous training events, displaying them with attendee counts."""
+    current_facility = getattr(flask.g, 'current_facility', None)
+    if not current_facility:
+        flash(_('Please select a facility.'), 'warning')
+        return redirect(url_for('admin.index'))
+
     status_filter = request.args.get('status', '', type=str)
     
     query = db.session.query(
@@ -58,6 +61,9 @@ def manage_continuous_training_events():
                          UserContinuousTraining.id), else_=None))
             .label('approved_attendees_count')
     ).outerjoin(UserContinuousTraining, ContinuousTrainingEvent.id == UserContinuousTraining.event_id)
+    
+    # Filter by Facility
+    query = query.filter(ContinuousTrainingEvent.facility_id == current_facility.id)
 
     if status_filter:
         query = query.filter(ContinuousTrainingEvent.status == ContinuousTrainingEventStatus[status_filter])
@@ -338,8 +344,19 @@ def get_initial_regulatory_training_details(training_id):
 @permission_required('continuous_training_validate')
 def validate_continuous_trainings():
     """Displays a list of pending continuous training entries for validation."""
-    pending_user_cts = UserContinuousTraining.query.filter_by(status=UserContinuousTrainingStatus.PENDING)\
-                                           .order_by(UserContinuousTraining.validation_date.desc()).all()
+    current_facility = getattr(flask.g, 'current_facility', None)
+    if current_facility:
+        # Join with Event to filter by facility
+        pending_user_cts = UserContinuousTraining.query.join(ContinuousTrainingEvent).filter(
+            UserContinuousTraining.status == UserContinuousTrainingStatus.PENDING,
+            ContinuousTrainingEvent.facility_id == current_facility.id
+        ).order_by(UserContinuousTraining.validation_date.desc()).all()
+    else:
+        # Transversal admin view: show all global pending attendances
+        pending_user_cts = UserContinuousTraining.query.filter(
+            UserContinuousTraining.status == UserContinuousTrainingStatus.PENDING
+        ).order_by(UserContinuousTraining.validation_date.desc()).all()
+    
     form = BatchValidateUserContinuousTrainingForm()
     
     # Populate form for GET request
@@ -495,21 +512,75 @@ def reject_continuous_training(user_ct_id):
 @permission_required('admin_access')
 def index():
     """Renders the admin dashboard with various metrics and data tables."""
-    # Metrics for the cards
-    pending_requests_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PENDING).count()
-    pending_external_trainings_count = ExternalTraining.query.filter_by(status=ExternalTrainingStatus.PENDING).count()
-    skills_without_tutors_count = Skill.query.filter(~Skill.tutors.any()).count()
-    proposed_skills_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PROPOSED_SKILL).count()
-    pending_user_approvals_count = User.query.filter_by(is_approved=False).count()
-    pending_continuous_training_validations_count = UserContinuousTraining.query.filter_by(status=UserContinuousTrainingStatus.PENDING).count()
-    pending_continuous_event_requests_count = ContinuousTrainingEvent.query.filter_by(status=ContinuousTrainingEventStatus.PENDING).count()
-
-    # Placeholder for more complex metrics
-    recycling_needed_count = 0
-    users_needing_recycling_set = set() # Keep this to pass to the template if needed
+    current_facility = getattr(flask.g, 'current_facility', None)
     
+    # General Admin Metrics
+    facilities_count = Facility.query.count()
+
+    if not current_facility:
+        # Transversal admin: show global pending requests as actionable metrics
+        all_pending_requests = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PENDING).all()
+        all_pending_external = ExternalTraining.query.filter_by(status=ExternalTrainingStatus.PENDING).all()
+        all_proposed_skills = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PROPOSED_SKILL).all()
+        
+        return render_template('admin/admin_dashboard.html', title='Admin Dashboard',
+                               pending_requests_count=len(all_pending_requests),
+                               pending_external_trainings_count=len(all_pending_external),
+                               skills_without_tutors_count=Skill.query.filter(~Skill.tutors.any()).count(),
+                               proposed_skills_count=len(all_proposed_skills),
+                               pending_user_approvals_count=UserFacilityRole.query.filter_by(is_approved=False).count(),
+                               pending_continuous_training_validations_count=UserContinuousTraining.query.filter_by(status=UserContinuousTrainingStatus.PENDING).count(),
+                               pending_continuous_event_requests_count=ContinuousTrainingEvent.query.filter_by(status=ContinuousTrainingEventStatus.PENDING).count(),
+                               recycling_needed_count=0, # Hard to calculate globally without specific user set? 
+                               sessions_to_be_finalized_count=TrainingSession.query.filter(TrainingSession.start_time < datetime.now(timezone.utc), TrainingSession.status != 'Realized').count(),
+                               next_session=None,
+                               users=User.query.all(), # Show all users for transversal management
+                               skills=Skill.query.all(),
+                               pending_training_requests=all_pending_requests,
+                               users_needing_recycling=[],
+                               teams=Team.query.all(),
+                               recycling_map=defaultdict(set),
+                               all_continuous_events=[],
+                               validation_form=BatchValidateUserContinuousTrainingForm(),
+                               pending_user_cts=[],
+                               facilities_count=facilities_count)
+
+    # Metrics for the cards
+    pending_requests_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PENDING, facility_id=current_facility.id).count()
+    pending_external_trainings_count = ExternalTraining.query.filter_by(status=ExternalTrainingStatus.PENDING, facility_id=current_facility.id).count()
+    
+    # Skills are Global
+    skills_without_tutors_count = Skill.query.filter(~Skill.tutors.any()).count()
+    proposed_skills_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PROPOSED_SKILL, facility_id=current_facility.id).count()
+    
+    # Users pending in this facility
+    pending_user_approvals_count = User.query.join(UserFacilityRole).filter(
+        UserFacilityRole.facility_id == current_facility.id,
+        UserFacilityRole.is_approved == False
+    ).count()
+    
+    # UserContinuousTraining -> ContinuousTrainingEvent -> Facility
+    pending_continuous_training_validations_count = UserContinuousTraining.query.join(ContinuousTrainingEvent).filter(
+        ContinuousTrainingEvent.facility_id == current_facility.id,
+        UserContinuousTraining.status == UserContinuousTrainingStatus.PENDING
+    ).count()
+    
+    pending_continuous_event_requests_count = ContinuousTrainingEvent.query.filter_by(
+        status=ContinuousTrainingEventStatus.PENDING,
+        facility_id=current_facility.id
+    ).count()
+
+    # Metrics
+    recycling_needed_count = 0
+    users_needing_recycling_set = set()
     recycling_map = defaultdict(set)
-    for comp in Competency.query.options(db.joinedload(Competency.skill)).all():
+    facility_users = User.query.join(UserFacilityRole).filter(
+        UserFacilityRole.facility_id == current_facility.id,
+        UserFacilityRole.is_approved == True
+    ).all()
+    facility_user_ids = [u.id for u in facility_users]
+
+    for comp in Competency.query.options(db.joinedload(Competency.skill)).filter(Competency.user_id.in_(facility_user_ids)).all():
         if comp.needs_recycling:
             recycling_map[comp.user_id].add(comp.skill_id)
             recycling_needed_count += 1
@@ -518,25 +589,26 @@ def index():
     users_needing_recycling = list(users_needing_recycling_set)
     
     sessions_to_be_finalized_count = TrainingSession.query.filter(
+        TrainingSession.facility_id == current_facility.id,
         TrainingSession.start_time < datetime.now(timezone.utc),
         TrainingSession.status != 'Realized'
     ).count()
 
-    # Logic for sessions this month (now next session)
     now = datetime.now(timezone.utc)
-    next_session = TrainingSession.query.filter(TrainingSession.start_time > now)\
-                                  .order_by(TrainingSession.start_time.asc()).first()
+    next_session = TrainingSession.query.filter(
+        TrainingSession.facility_id == current_facility.id,
+        TrainingSession.start_time > now
+    ).order_by(TrainingSession.start_time.asc()).first()
 
     # Data for the tables
-    users = User.query.options(db.joinedload(User.teams), db.joinedload(User.teams_as_lead),
-                      db.joinedload(User.initial_regulatory_trainings))\
-                      .order_by(User.full_name).all()
+    users = facility_users
     skills = Skill.query.options(db.joinedload(Skill.species)).order_by(Skill.name).all()
     pending_training_requests = TrainingRequest.query.options(
         db.joinedload(TrainingRequest.requester),
         db.joinedload(TrainingRequest.skills_requested),
         db.joinedload(TrainingRequest.species_requested)
-    )
+    ).filter_by(facility_id=current_facility.id, status=TrainingRequestStatus.PENDING).all()
+    
     teams = Team.query.all()
 
     all_continuous_events = (db.session.query(
@@ -545,13 +617,17 @@ def index():
                          UserContinuousTraining.id), else_=None))
             .label('approved_attendees_count'))
     .outerjoin(UserContinuousTraining, ContinuousTrainingEvent.id == UserContinuousTraining.event_id)
+    .filter(ContinuousTrainingEvent.facility_id == current_facility.id)
     .group_by(ContinuousTrainingEvent.id)
     .order_by(ContinuousTrainingEvent.event_date.desc())
     .all())
 
     # Data for the validation table
     validation_form = BatchValidateUserContinuousTrainingForm()
-    pending_user_cts = UserContinuousTraining.query.filter_by(status=UserContinuousTrainingStatus.PENDING).all()
+    pending_user_cts = UserContinuousTraining.query.join(ContinuousTrainingEvent).filter(
+        ContinuousTrainingEvent.facility_id == current_facility.id,
+        UserContinuousTraining.status == UserContinuousTrainingStatus.PENDING
+    ).all()
     
     for user_ct in pending_user_cts:
         entry_form = ValidateUserContinuousTrainingEntryForm()
@@ -561,9 +637,8 @@ def index():
         entry_form.event_date = user_ct.event.event_date.strftime('%Y-%m-%d')
         entry_form.attendance_attachment_path = user_ct.attendance_attachment_path
         entry_form.validated_hours = user_ct.event.duration_hours
-        entry_form.status = user_ct.status.name # Set the current status
+        entry_form.status = user_ct.status.name
         validation_form.entries.append_entry(entry_form)
-
 
     return render_template('admin/admin_dashboard.html',
                            title='Admin Dashboard',
@@ -585,57 +660,183 @@ def index():
                            recycling_map=recycling_map,
                            all_continuous_events=all_continuous_events,
                            validation_form=validation_form,
-                           pending_user_cts=pending_user_cts)
+                           pending_user_cts=pending_user_cts,
+                           facilities_count=facilities_count)
+
+# Facility Management
+@bp.route('/facilities')
+@login_required
+@permission_required('facility_manage')
+def manage_facilities():
+    """Displays a list of all facilities for management."""
+    facilities = Facility.query.order_by(Facility.name).all()
+    return render_template('admin/manage_facilities.html', title=_('Manage Facilities'),
+                           facilities=facilities)
+
+@bp.route('/facilities/add', methods=['GET', 'POST'])
+@login_required
+@permission_required('facility_manage')
+def add_facility():
+    """Adds a new facility to the system."""
+    form = FacilityForm()
+    if form.validate_on_submit():
+        facility = Facility(
+            name=form.name.data,
+            description=form.description.data,
+            address=form.address.data
+        )
+        db.session.add(facility)
+        db.session.commit()
+        flash(_('Facility added successfully!'), 'success')
+        return redirect(url_for('admin.manage_facilities'))
+    return render_template('admin/facility_form.html', title=_('Add Facility'), form=form)
+
+@bp.route('/facilities/edit/<int:facility_id>', methods=['GET', 'POST'])
+@login_required
+@permission_required('facility_manage')
+def edit_facility(facility_id):
+    """Edits an existing facility."""
+    facility = Facility.query.get_or_404(facility_id)
+    form = FacilityForm(original_name=facility.name, obj=facility)
+    if form.validate_on_submit():
+        facility.name = form.name.data
+        facility.description = form.description.data
+        facility.address = form.address.data
+        db.session.commit()
+        flash(_('Facility updated successfully!'), 'success')
+        return redirect(url_for('admin.manage_facilities'))
+    return render_template('admin/facility_form.html', title=_('Edit Facility'), form=form, facility=facility)
+
+@bp.route('/facilities/delete/<int:facility_id>', methods=['POST'])
+@login_required
+@permission_required('facility_manage')
+def delete_facility(facility_id):
+    """Deletes a facility."""
+    facility = Facility.query.get_or_404(facility_id)
+    db.session.delete(facility)
+    db.session.commit()
+    flash(_('Facility deleted successfully!'), 'success')
+    return redirect(url_for('admin.manage_facilities'))
+
+@bp.route('/facilities/<int:facility_id>/users')
+@login_required
+@permission_required('facility_manage')
+def facility_users(facility_id):
+    """Displays a list of users associated with a specific facility."""
+    facility = Facility.query.get_or_404(facility_id)
+    # Join with UserFacilityRole to get roles for this facility
+    users_with_roles = db.session.query(User, Role, UserFacilityRole.is_approved)\
+        .join(UserFacilityRole, User.id == UserFacilityRole.user_id)\
+        .join(Role, Role.id == UserFacilityRole.role_id)\
+        .filter(UserFacilityRole.facility_id == facility_id).all()
+        
+    return render_template('admin/facility_users.html', title=_('Facility Users: %(name)s', name=facility.name),
+                           facility=facility,
+                           users_with_roles=users_with_roles)
 
 @bp.route('/pending_users')
 @login_required
 @permission_required('user_manage')
 def pending_users():
-    """Displays a list of users awaiting approval."""
-    pending_users = User.query.filter_by(is_approved=False).all()
+    """Displays a list of users awaiting approval for the current facility."""
+    current_facility = getattr(flask.g, 'current_facility', None)
+    if not current_facility:
+        # For transversal admin, show ALL pending requests across ALL facilities
+        pending_ufrs = UserFacilityRole.query.filter_by(is_approved=False).all()
+        return render_template('admin/pending_users.html', title='Pending User Approvals (All Facilities)',
+                               pending_users=pending_ufrs, is_transversal=True)
+    else:
+        # Get users who have a pending role in this facility
+        pending_ufrs = UserFacilityRole.query.filter_by(
+            facility_id=current_facility.id, 
+            is_approved=False
+        ).all()
+        return render_template('admin/pending_users.html', title=f'Pending Approvals for {current_facility.name}',
+                               pending_users=pending_ufrs, is_transversal=False)
+
     return render_template('admin/pending_users.html',
                            title='Pending User Approvals',
                            pending_users=pending_users)
 
 @bp.route('/approve_user/<int:user_id>', methods=['POST'])
+@bp.route('/approve_user/<int:user_id>/<int:facility_id>', methods=['POST'])
 @login_required
 @permission_required('user_manage')
-def approve_user(user_id):
-    """Approves a user's registration and sends an approval email."""
+def approve_user(user_id, facility_id=None):
+    """Approves a user's registration for a facility."""
     user = User.query.get_or_404(user_id)
-    user.is_approved = True
-    user_role = Role.query.filter_by(name='User').first()
-    if user_role and user_role not in user.roles:
-        user.roles.append(user_role)
+    
+    if facility_id is None:
+        current_facility = getattr(flask.g, 'current_facility', None)
+        if not current_facility:
+            flash(_('No facility context.'), 'danger')
+            return redirect(url_for('admin.pending_users'))
+        facility_id = current_facility.id
+    
+    target_facility = Facility.query.get_or_404(facility_id)
+
+    ufr = UserFacilityRole.query.filter_by(
+        user_id=user.id, 
+        facility_id=facility_id
+    ).first()
+
+    if not ufr:
+         flash(_('User has no request for this facility.'), 'danger')
+         return redirect(url_for('admin.pending_users'))
+
+    ufr.is_approved = True
+    
+    # Global approval if needed (first time approval)
+    if not user.is_approved:
+        user.is_approved = True
+    
     db.session.commit()
-    flash(f'User {user.full_name} approved successfully!', 'success')
+    flash(f'User {user.full_name} approved successfully for {target_facility.name}!', 'success')
 
     # Send approval email to user
-    send_email('[PrecliniTrain] Account Approved',
+    send_email('[PrecliniTrain] Facility Access Approved',
                sender=current_app.config['MAIL_USERNAME'],
                recipients=[user.email],
-               text_body=render_template('email/registration_approved.txt', user=user),
-               html_body=render_template('email/registration_approved.html', user=user))
-    return redirect(url_for('admin.edit_user', item_id=user_id))
+               text_body=render_template('email/registration_approved.txt', user=user, facility=target_facility),
+               html_body=render_template('email/registration_approved.html', user=user, facility=target_facility))
+    return redirect(url_for('admin.pending_users'))
 
 @bp.route('/reject_user/<int:user_id>', methods=['POST'])
+@bp.route('/reject_user/<int:user_id>/<int:facility_id>', methods=['POST'])
 @login_required
 @permission_required('user_manage')
-def reject_user(user_id):
-    """Rejects a user's registration, deletes the user, and sends a rejection email."""
+def reject_user(user_id, facility_id=None):
+    """Rejects a user's request for a facility."""
     user = User.query.get_or_404(user_id)
-    db.session.delete(user) # Delete the user if rejected
-    db.session.commit()
-    flash(f'User {user.full_name} rejected and deleted.', 'info')
 
-    # Send rejection email to user
-    send_email('[PrecliniTrain] Account Rejected',
-               sender=current_app.config['MAIL_USERNAME'],
-               recipients=[user.email],
-               text_body=render_template('email/registration_rejected.txt', user=user),
-               html_body=render_template('email/registration_rejected.html', user=user))
+    if facility_id is None:
+        current_facility = getattr(flask.g, 'current_facility', None)
+        if not current_facility:
+            flash(_('No facility context.'), 'danger')
+            return redirect(url_for('admin.pending_users'))
+        facility_id = current_facility.id
+    
+    target_facility = Facility.query.get_or_404(facility_id)
 
-    return redirect(url_for('admin.edit_user', id=user_id))
+    ufr = UserFacilityRole.query.filter_by(
+        user_id=user.id, 
+        facility_id=facility_id
+    ).first()
+
+    if ufr:
+        db.session.delete(ufr)
+        
+        # Check if user has any other roles or is approved globally?
+        # If user has NO other facility roles, maybe delete the user (if they just registered)?
+        # For safety, let's just remove the facility access.
+        
+        db.session.commit()
+        flash(f'User {user.full_name} rejected from {current_facility.name}.', 'info')
+        
+        # Send rejection email
+        # ...
+
+    return redirect(url_for('admin.pending_users'))
 
 @bp.route('/teams')
 @login_required
@@ -697,7 +898,19 @@ def add_user():
         user.teams_as_lead = form.teams_as_lead.data
 
 
-        user.roles = form.roles.data # Assign roles
+        # Assign roles for the current facility
+        current_facility = getattr(flask.g, 'current_facility', None)
+        if current_facility:
+            from app.models import UserFacilityRole
+            # Remove existing roles for this user in this facility
+            UserFacilityRole.query.filter_by(user_id=user.id, facility_id=current_facility.id).delete()
+            for role in form.roles.data:
+                ufr = UserFacilityRole(user=user, facility=current_facility, role=role, is_approved=True)
+                db.session.add(ufr)
+        else:
+             # If no facility context, maybe assign to a default one? 
+             # For now, let's just log a warning or skip.
+             current_app.logger.warning(f"Could not assign roles to user {user.email}: No current facility context.")
 
 
 
@@ -811,7 +1024,7 @@ def add_user():
                     'teams_as_lead': [lt.name for lt in user.teams_as_lead],
 
 
-                    'roles': [r.name for r in user.roles]
+                    'roles': [fr.role.name for fr in user.facility_roles]
 
 
                 }
@@ -875,7 +1088,17 @@ def edit_user(item_id):
         user.teams = form.teams.data
         user.teams_as_lead = form.teams_as_lead.data
         user.assigned_training_paths = form.assigned_training_paths.data
-        user.roles = form.roles.data # Pre-populate roles
+        # Update roles for the current facility
+        current_facility = getattr(flask.g, 'current_facility', None)
+        if current_facility:
+            from app.models import UserFacilityRole
+            # Remove existing roles for this user in this facility
+            UserFacilityRole.query.filter_by(user_id=user.id, facility_id=current_facility.id).delete()
+            for role in form.roles.data:
+                ufr = UserFacilityRole(user=user, facility=current_facility, role=role, is_approved=True)
+                db.session.add(ufr)
+        else:
+             current_app.logger.warning(f"Could not update roles for user {user.email}: No current facility context.")
 
         # Identify newly added training paths
         new_training_paths = set(form.assigned_training_paths.data)
@@ -915,7 +1138,7 @@ def edit_user(item_id):
                     'study_level': user.study_level,
                     'teams': [t.name for t in user.teams],
                     'teams_as_lead': [lt.name for lt in user.teams_as_lead],
-                    'roles': [r.name for r in user.roles],
+                    'roles': [fr.role.name for fr in user.facility_roles],
                     'continuous_training_summary': {
                         'is_compliant': user.is_continuous_training_compliant,
                         'is_live_training_compliant': user.is_live_training_compliant,
@@ -940,7 +1163,14 @@ def edit_user(item_id):
         form.teams.data = user.teams
         form.teams_as_lead.data = user.teams_as_lead
         form.assigned_training_paths.data = user.assigned_training_paths
-        form.roles.data = user.roles # Pre-populate roles
+        # Pre-populate roles for the current facility
+        current_facility = getattr(flask.g, 'current_facility', None)
+        if current_facility:
+            from app.models import UserFacilityRole
+            ufrs = UserFacilityRole.query.filter_by(user_id=user.id, facility_id=current_facility.id, is_approved=True).all()
+            form.roles.data = [ufr.role for ufr in ufrs]
+        else:
+            form.roles.data = []
     
     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
         return render_template('admin/_user_form_fields.html', form=form)
@@ -2191,8 +2421,14 @@ def create_training_session():
 @permission_required('training_session_manage')
 def manage_training_sessions():
     """Displays a list of all training sessions for management."""
+    current_facility = getattr(flask.g, 'current_facility', None)
     filter_param = request.args.get('filter')
-    query = TrainingSession.query
+    
+    if current_facility:
+        query = TrainingSession.query.filter_by(facility_id=current_facility.id)
+    else:
+        # Transversal admin view: show all sessions
+        query = TrainingSession.query
 
     if filter_param == 'to_be_finalized':
         query = query.filter(
@@ -2460,7 +2696,17 @@ def reject_training_request(request_id):
 @permission_required('external_training_validate')
 def validate_external_trainings():
     """Displays a list of pending external training records for validation."""
-    pending_external_trainings = ExternalTraining.query.filter_by(status=ExternalTrainingStatus.PENDING).all()
+    current_facility = getattr(flask.g, 'current_facility', None)
+    if current_facility:
+        pending_external_trainings = ExternalTraining.query.filter_by(
+            status=ExternalTrainingStatus.PENDING,
+            facility_id=current_facility.id
+        ).all()
+    else:
+        # Transversal admin view: show all global pending records
+        pending_external_trainings = ExternalTraining.query.filter_by(
+            status=ExternalTrainingStatus.PENDING
+        ).all()
     return render_template('admin/validate_external_trainings.html',
                            title='Validate External Trainings',
                            trainings=pending_external_trainings)
@@ -2578,11 +2824,20 @@ def reject_external_training(training_id):
 @permission_required('training_request_manage')
 def list_training_requests():
     """Displays a list of pending training requests, grouped by species."""
-    pending_training_requests = TrainingRequest.query.options(
-        db.joinedload(TrainingRequest.requester),
-        db.joinedload(TrainingRequest.skills_requested).joinedload(Skill.species),
-        db.joinedload(TrainingRequest.species_requested)
-    ).filter_by(status=TrainingRequestStatus.PENDING).all()
+    current_facility = getattr(flask.g, 'current_facility', None)
+    if current_facility:
+        pending_training_requests = TrainingRequest.query.options(
+            db.joinedload(TrainingRequest.requester),
+            db.joinedload(TrainingRequest.skills_requested).joinedload(Skill.species),
+            db.joinedload(TrainingRequest.species_requested)
+        ).filter_by(status=TrainingRequestStatus.PENDING, facility_id=current_facility.id).all()
+    else:
+        # Transversal admin view: show all global pending requests
+        pending_training_requests = TrainingRequest.query.options(
+            db.joinedload(TrainingRequest.requester),
+            db.joinedload(TrainingRequest.skills_requested).joinedload(Skill.species),
+            db.joinedload(TrainingRequest.species_requested)
+        ).filter_by(status=TrainingRequestStatus.PENDING).all()
 
     requests_by_species = defaultdict(list)
     

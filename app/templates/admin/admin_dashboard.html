@@ -28,7 +28,7 @@
                 <div class="card-body">
                     <div class="row no-gutters align-items-center">
                         <div class="col mr-2">
-                            <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">Utilisateurs en Attente d'Approbation</div>
+                            <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">Demandes d'Accès aux Installations</div>
                             <div class="h5 mb-0 font-weight-bold text-gray-800">{{ pending_user_approvals_count }}</div>
                         </div>
                         <div class="col-auto">
@@ -339,7 +339,7 @@
                                         <a href="{{ url_for('admin.edit_continuous_training_event', event_id=event.id) }}" class="btn btn-sm btn-warning" title="Éditer"><i class="fa fa-edit"></i></a>
                                         <form action="{{ url_for('admin.delete_continuous_training_event', event_id=event.id) }}" method="post" style="display:inline;">
                                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                            <button type="submit" class="btn btn-sm btn-danger" title="Supprimer" onclick="return confirm("Êtes-vous sûr de vouloir supprimer cet événement ?");"><i class="fa fa-trash"></i></button>
+                                            <button type="submit" class="btn btn-sm btn-danger" title="Supprimer" onclick="return confirm('Êtes-vous sûr de vouloir supprimer cet événement ?');"><i class="fa fa-trash"></i></button>
                                         </form>
                                     </td>
                                 </tr>
@@ -436,6 +436,7 @@
                                 <tr>
                                     <th>Nom complet</th>
                                     <th>Email</th>
+                                    <th>Installations</th>
                                     <th>Équipe</th>
                                     <th>Rôles</th>
                                     <th>Status FC</th>
@@ -448,6 +449,13 @@
                                 <tr id="user-row-{{ user.id }}">
                                     <td>{{ user.full_name }}</td>
                                     <td>{{ user.email }}</td>
+                                    <td>
+                                        {% for fr in user.facility_roles %}
+                                            <span class="badge bg-outline-primary border border-primary text-primary">{{ fr.facility.name }}</span>
+                                        {% else %}
+                                            <span class="text-muted">Aucune</span>
+                                        {% endfor %}
+                                    </td>
                                     <td>
                                         {% for team in user.teams %}
                                             <span class="badge bg-secondary">{{ team.name }}</span>

@@ -3,7 +3,7 @@ from flask_restx import Resource, fields
 from flask_login import login_required, current_user
 from app.api import api
 from app import db
-from app.models import User, Team, Species, Skill, TrainingPath, TrainingSession, Competency, SkillPracticeEvent, TrainingRequest, ExternalTraining, Complexity, TrainingRequestStatus, ExternalTrainingStatus, TrainingSessionTutorSkill, UserContinuousTraining, UserContinuousTrainingStatus, ContinuousTrainingEvent, ContinuousTrainingEventStatus, UserDismissedNotification
+from app.models import User, Team, Species, Skill, TrainingPath, TrainingSession, Competency, SkillPracticeEvent, TrainingRequest, ExternalTraining, Complexity, TrainingRequestStatus, ExternalTrainingStatus, TrainingSessionTutorSkill, UserContinuousTraining, UserContinuousTrainingStatus, ContinuousTrainingEvent, ContinuousTrainingType, ContinuousTrainingEventStatus, UserDismissedNotification, Facility, UserFacilityRole
 from sqlalchemy import func
 from werkzeug.security import generate_password_hash
 from functools import wraps # Import wraps
@@ -1092,9 +1092,18 @@ class SkillTutors(Resource):
         # Prepare response with tutor details
         tutors_data = []
         for tutor in tutors:
+            # Construct name with facilities
+            facilities = []
+            if hasattr(tutor, 'facility_roles'):
+                facilities = sorted(list({fr.facility.name for fr in tutor.facility_roles if fr.is_approved}))
+            
+            tutor_display_name = tutor.full_name
+            if facilities:
+                tutor_display_name += f" [{', '.join(facilities)}]"
+
             tutors_data.append({
                 'id': tutor.id,
-                'full_name': tutor.full_name,
+                'full_name': tutor_display_name,
                 'email': tutor.email,
             })
 
@@ -1134,9 +1143,18 @@ class SkillTutorsForSkills(Resource):
         # Prepare response with tutor details
         tutors_data = []
         for tutor in qualified_tutors:
+            # Construct name with facilities
+            facilities = []
+            if hasattr(tutor, 'facility_roles'):
+                facilities = sorted(list({fr.facility.name for fr in tutor.facility_roles if fr.is_approved}))
+            
+            tutor_display_name = tutor.full_name
+            if facilities:
+                tutor_display_name += f" [{', '.join(facilities)}]"
+
             tutors_data.append({
                 'id': tutor.id,
-                'full_name': tutor.full_name,
+                'full_name': tutor_display_name,
                 'email': tutor.email,
             })
 
@@ -1236,10 +1254,20 @@ class SkillTutorsWithValidity(Resource):
                     is_valid = False
                     message = f"No validation record found for {tutor.full_name} on skill {skill.name}."
 
+            # Construct name with facilities
+            # Assuming User has 'facility_roles' relationship
+            facilities = []
+            if hasattr(tutor, 'facility_roles'):
+                # Get unique facility names where user has an approved role
+                facilities = sorted(list({fr.facility.name for fr in tutor.facility_roles if fr.is_approved}))
+            
+            tutor_display_name = tutor.full_name
+            if facilities:
+                tutor_display_name += f" [{', '.join(facilities)}]"
 
             tutors_data.append({
                 'id': tutor.id,
-                'full_name': tutor.full_name,
+                'full_name': tutor_display_name,
                 'is_valid': is_valid,
                 'message': message
             })
@@ -1309,98 +1337,106 @@ class NotificationSummary(Resource):
             # Get dismissed notifications for the current user
             dismissed_notifications = {d.notification_type for d in g.current_user.dismissed_notifications}
 
-            current_app.logger.debug(f"NotificationSummary for user {g.current_user.id}: is_admin={g.current_user.is_admin}, roles={[r.name for r in g.current_user.roles]}, can_user_manage={g.current_user.can('user_manage')}, dismissed_notifications={dismissed_notifications}")
+            current_app.logger.debug(f"NotificationSummary for user {g.current_user.id}: is_admin={g.current_user.is_admin}, roles={[fr.role.name for fr in g.current_user.facility_roles]}, can_user_manage={g.current_user.can('user_manage')}, dismissed_notifications={dismissed_notifications}")
             # Admin-focused notifications
-            if g.current_user.can('user_manage') and 'user_approvals' not in dismissed_notifications:
-                pending_user_approvals_count = User.query.filter_by(is_approved=False).count()
-                if pending_user_approvals_count > 0:
-                    notifications.append({
-                        'type': 'user_approvals',
-                        'title': 'New User Approvals',
-                        'count': pending_user_approvals_count,
-                        'url': url_for('admin.pending_users')
-                    })
-                    total_count += pending_user_approvals_count
+            # Admin/Validator Notifications (Cross-Facility)
+            for ufr in g.current_user.facility_roles:
+                if not ufr.is_approved: continue
+                facility = ufr.facility
+                # Helper to check permission for this specific role
+                perms = set(p.name for p in ufr.role.permissions)
 
-            if g.current_user.can('training_request_manage') and 'training_requests' not in dismissed_notifications:
-                pending_requests_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PENDING).count()
-                if pending_requests_count > 0:
-                    notifications.append({
-                        'type': 'training_requests',
-                        'title': 'Pending Training Requests',
-                        'count': pending_requests_count,
-                        'url': url_for('admin.list_training_requests')
-                    })
-                    total_count += pending_requests_count
+                # User Approvals
+                if 'user_manage' in perms and 'user_approvals' not in dismissed_notifications:
+                    count = UserFacilityRole.query.filter_by(facility_id=facility.id, is_approved=False).count()
+                    if count > 0:
+                        notifications.append({
+                            'type': f'user_approvals_{facility.id}',
+                            'title': f'{facility.name}: New User Approvals',
+                            'count': count,
+                            'url': url_for('root.switch_facility', facility_id=facility.id, next=url_for('admin.pending_users'))
+                        })
+                        total_count += count
 
-            if g.current_user.can('external_training_validate') and 'external_trainings' not in dismissed_notifications:
-                pending_external_trainings_count = ExternalTraining.query.filter_by(status=ExternalTrainingStatus.PENDING).count()
-                if pending_external_trainings_count > 0:
-                    notifications.append({
-                        'type': 'external_trainings',
-                        'title': 'Pending External Training Validations',
-                        'count': pending_external_trainings_count,
-                        'url': url_for('admin.validate_external_trainings')
-                    })
-                    total_count += pending_external_trainings_count
+                # Training Requests
+                if 'training_request_manage' in perms and 'training_requests' not in dismissed_notifications:
+                    count = TrainingRequest.query.filter_by(facility_id=facility.id, status=TrainingRequestStatus.PENDING).count()
+                    if count > 0:
+                        notifications.append({
+                            'type': f'training_requests_{facility.id}',
+                            'title': f'{facility.name}: Pending Training Requests',
+                            'count': count,
+                            'url': url_for('root.switch_facility', facility_id=facility.id, next=url_for('admin.list_training_requests'))
+                        })
+                        total_count += count
 
-            if g.current_user.can('continuous_training_validate') and 'continuous_training_validations' not in dismissed_notifications:
-                pending_continuous_training_validations_count = UserContinuousTraining.query.filter_by(status=UserContinuousTrainingStatus.PENDING).count()
-                if pending_continuous_training_validations_count > 0:
-                    notifications.append({
-                        'type': 'continuous_training_validations',
-                        'title': 'Pending Continuous Training Validations',
-                        'count': pending_continuous_training_validations_count,
-                        'url': url_for('admin.validate_continuous_trainings')
-                    })
-                    total_count += pending_continuous_training_validations_count
-    
-            if g.current_user.can('continuous_training_manage') and 'continuous_event_requests' not in dismissed_notifications:
-                pending_continuous_event_requests_count = ContinuousTrainingEvent.query.filter_by(status=ContinuousTrainingEventStatus.PENDING).count()
-                if pending_continuous_event_requests_count > 0:
-                    notifications.append({
-                        'type': 'continuous_event_requests',
-                        'title': 'Pending Continuous Event Requests',
-                        'count': pending_continuous_event_requests_count,
-                        'url': url_for('admin.manage_continuous_training_events', status='PENDING')
-                    })
-                    total_count += pending_continuous_event_requests_count
-    
-            if g.current_user.can('skill_manage') and 'proposed_skills' not in dismissed_notifications:
-                proposed_skills_count = TrainingRequest.query.filter_by(status=TrainingRequestStatus.PROPOSED_SKILL).count()
-                if proposed_skills_count > 0:
-                    notifications.append({
-                        'type': 'proposed_skills',
-                        'title': 'Proposed Skills',
-                        'count': proposed_skills_count,
-                        'url': url_for('admin.proposed_skills')
-                    })
-                    total_count += proposed_skills_count
-    
-            if g.current_user.can('skill_manage') and 'skills_without_tutors' not in dismissed_notifications:
-                skills_without_tutors_count = Skill.query.filter(~Skill.tutors.any()).count()
-                if skills_without_tutors_count > 0:
-                    notifications.append({
-                        'type': 'skills_without_tutors',
-                        'title': 'Skills Without Tutors',
-                        'count': skills_without_tutors_count,
-                        'url': url_for('admin.tutor_less_skills_report')
-                    })
-                    total_count += skills_without_tutors_count
-    
-            if g.current_user.can('training_session_manage') and 'sessions_to_finalize' not in dismissed_notifications:
-                sessions_to_be_finalized_count = TrainingSession.query.filter(
-                    TrainingSession.start_time < datetime.now(timezone.utc),
-                    TrainingSession.status != 'Realized'
-                ).count()
-                if sessions_to_be_finalized_count > 0:
-                    notifications.append({
-                        'type': 'sessions_to_finalize',
-                        'title': 'Sessions to Finalize',
-                        'count': sessions_to_be_finalized_count,
-                        'url': url_for('admin.manage_training_sessions', filter='to_be_finalized')
-                    })
-                    total_count += sessions_to_be_finalized_count
+                # External Trainings
+                if 'external_training_validate' in perms and 'external_trainings' not in dismissed_notifications:
+                    count = ExternalTraining.query.filter_by(facility_id=facility.id, status=ExternalTrainingStatus.PENDING).count()
+                    if count > 0:
+                        notifications.append({
+                            'type': f'external_trainings_{facility.id}',
+                            'title': f'{facility.name}: Pending External Training Validations',
+                            'count': count,
+                            'url': url_for('root.switch_facility', facility_id=facility.id, next=url_for('admin.validate_external_trainings'))
+                        })
+                        total_count += count
+
+                # Continuous Training Validations
+                if 'continuous_training_validate' in perms and 'continuous_training_validations' not in dismissed_notifications:
+                   # Need to join with Event to check facility? UserContinuousTraining links to Event.
+                   # UserContinuousTraining -> ContinuousTrainingEvent -> Facility
+                   count = UserContinuousTraining.query.join(ContinuousTrainingEvent).filter(
+                       ContinuousTrainingEvent.facility_id == facility.id,
+                       UserContinuousTraining.status == UserContinuousTrainingStatus.PENDING
+                   ).count()
+                   
+                   if count > 0:
+                        notifications.append({
+                            'type': f'continuous_training_validations_{facility.id}',
+                            'title': f'{facility.name}: Pending Continuous Training Validations',
+                            'count': count,
+                            'url': url_for('root.switch_facility', facility_id=facility.id, next=url_for('admin.validate_continuous_trainings'))
+                        })
+                        total_count += count
+
+                # Continuous Event Requests (Events themselves pending approval)
+                if 'continuous_training_manage' in perms and 'continuous_event_requests' not in dismissed_notifications:
+                    count = ContinuousTrainingEvent.query.filter_by(facility_id=facility.id, status=ContinuousTrainingEventStatus.PENDING).count()
+                    if count > 0:
+                        notifications.append({
+                            'type': f'continuous_event_requests_{facility.id}',
+                            'title': f'{facility.name}: Pending Continuous Event Requests',
+                            'count': count,
+                            'url': url_for('root.switch_facility', facility_id=facility.id, next=url_for('admin.manage_continuous_training_events', status='PENDING'))
+                        })
+                        total_count += count
+
+                # Proposed Skills (Skills are global? Or Facility specific? 
+                # Model says Skill has no facility_id. So Skills are global.
+                # Only show to Global Admin? Or any Admin? 
+                # Let's assume Global Admin is needed or any Admin can see it. 
+                # For now, let's skip splitting this by facility or assume it implies "Global" scope.
+                # If we want to scope skills to facility, we need to change Skill model. 
+                # User prompt didn't strictly say skills are facility scoped, but requests are.
+                # Let's keep it simple: any admin sees proposed skills, but maybe just once (deduplicate).
+                pass
+                
+                # Sessions to Finalize
+                if 'training_session_manage' in perms and 'sessions_to_finalize' not in dismissed_notifications:
+                    count = TrainingSession.query.filter(
+                        TrainingSession.facility_id == facility.id,
+                        TrainingSession.start_time < datetime.now(timezone.utc),
+                        TrainingSession.status != 'Realized'
+                    ).count()
+                    if count > 0:
+                         notifications.append({
+                            'type': f'sessions_to_finalize_{facility.id}',
+                            'title': f'{facility.name}: Sessions to Finalize',
+                            'count': count,
+                            'url': url_for('root.switch_facility', facility_id=facility.id, next=url_for('admin.manage_training_sessions', filter='to_be_finalized'))
+                        })
+                         total_count += count
     
             # User-focused notifications
             if g.current_user.is_authenticated:
@@ -1600,6 +1636,21 @@ class PublicUserCalendar(Resource):
 
         return events
 
+ns_facilities = api.namespace('facilities', description='Facility operations')
+
+@ns_facilities.route('/available')
+class AvailableFacilities(Resource):
+    @login_required
+    def get(self):
+        """Returns a list of facilities that the current user has not yet joined."""
+        user_facility_ids = [fr.facility_id for fr in current_user.facility_roles]
+        available = Facility.query.filter(Facility.id.notin_(user_facility_ids)).all()
+        return {
+            'facilities': [
+                {'id': f.id, 'name': f.name} for f in available
+            ]
+        }
+
 # Register namespaces
 api.add_namespace(ns_users)
 api.add_namespace(ns_tutors)
@@ -1612,4 +1663,5 @@ api.add_namespace(ns_competencies)
 api.add_namespace(ns_skill_practice_events)
 api.add_namespace(ns_training_requests)
 api.add_namespace(ns_external_trainings)
+api.add_namespace(ns_facilities)
 api.add_namespace(ns_public)

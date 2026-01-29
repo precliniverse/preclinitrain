@@ -21,10 +21,7 @@ role_permission_association = db.Table('role_permission_association',
     db.Column('permission_id', db.Integer, db.ForeignKey('permission.id'), primary_key=True)
 )
 
-user_role_association = db.Table('user_role_association',
-    db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True),
-    db.Column('role_id', db.Integer, db.ForeignKey('role.id'), primary_key=True)
-)
+# User-Role association is now handled by the UserFacilityRole model
 
 tutor_skill_association = db.Table('tutor_skill_association',
     db.Column('user_id', db.Integer, db.ForeignKey('user.id'), primary_key=True),
@@ -136,6 +133,55 @@ user_team_leadership = db.Table('user_team_leadership',
     db.Column('team_id', db.Integer, db.ForeignKey('team.id'), primary_key=True)
 )
 
+class Facility(db.Model):
+    """
+    Represents a facility or research center in the system.
+    """
+    __tablename__ = 'facility'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(128), unique=True, nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+    address = db.Column(db.String(256), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    
+    # Relationships
+    user_roles = db.relationship('UserFacilityRole', back_populates='facility', cascade='all, delete-orphan')
+    training_requests = db.relationship('TrainingRequest', back_populates='facility')
+    external_trainings = db.relationship('ExternalTraining', back_populates='facility')
+    training_sessions = db.relationship('TrainingSession', back_populates='facility')
+    continuous_training_events = db.relationship('ContinuousTrainingEvent', back_populates='facility')
+    
+    def __repr__(self):
+        return f'<Facility {self.name}>'
+
+
+class UserFacilityRole(db.Model):
+    """
+    Represents a user's role at a specific facility.
+    This replaces the direct user-role relationship with a facility-scoped approach.
+    """
+    __tablename__ = 'user_facility_role'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    facility_id = db.Column(db.Integer, db.ForeignKey('facility.id'), nullable=False)
+    role_id = db.Column(db.Integer, db.ForeignKey('role.id'), nullable=False)
+    is_approved = db.Column(db.Boolean, default=False, nullable=False)
+    requested_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    approved_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    
+    # Relationships
+    user = db.relationship('User', back_populates='facility_roles')
+    facility = db.relationship('Facility', back_populates='user_roles')
+    role = db.relationship('Role')
+    
+    # Unique constraint: a user can only have one role per facility
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'facility_id', name='_user_facility_uc'),
+    )
+    
+    def __repr__(self):
+        return f'<UserFacilityRole User:{self.user_id} Facility:{self.facility_id} Role:{self.role_id}>'
+
 
 class Complexity(enum.Enum):
     """
@@ -190,8 +236,14 @@ class User(UserMixin, db.Model):
 
     teams_as_lead = db.relationship('Team', secondary=user_team_leadership,
                                     back_populates='team_leads')
-    roles = db.relationship('Role', secondary=user_role_association,
-                            back_populates='users', lazy='dynamic')
+    
+    # Updated relationship to support multi-facility roles
+    facility_roles = db.relationship('UserFacilityRole', back_populates='user', 
+                                     cascade='all, delete-orphan')
+    
+    # Legacy 'roles' property might be needed for migration or broken code, 
+    # but strictly speaking we should move to facility_roles.
+    # We will define properties to access roles in the context of a facility.
     competencies = db.relationship('Competency', back_populates='user', lazy='selectin',
                                    foreign_keys=lambda: [Competency.user_id])
     evaluated_competencies = db.relationship('Competency', back_populates='evaluator',
@@ -375,21 +427,50 @@ class User(UserMixin, db.Model):
         hours_last_5_years = self.get_continuous_training_hours(start_date, end_date)
         return hours_last_5_years < (2.5 * self.HOURS_PER_DAY)
 
-    def has_role(self, role_name):
+    def has_role(self, role_name, facility_id=None):
         """
         Checks if the user has a specific role.
+        If facility_id is provided, checks only within that facility.
         """
-        return self.roles.filter_by(name=role_name).first() is not None
+        if facility_id:
+             return any(
+                 r.role.name == role_name and r.facility_id == facility_id and r.is_approved 
+                 for r in self.facility_roles
+             )
+        # If no facility specified, check if they have the role anywhere (Global scope check)
+        # OR this might be deprecated usage. For now, let's return True if they have it anywhere.
+        return any(r.role.name == role_name for r in self.facility_roles)
 
-    def can(self, permission_name):
+    def can(self, permission_name, facility_id=None):
         """
         Checks if the user has a specific permission.
+        If facility_id is provided, checks within that context.
         """
-        if self.is_admin: # Admins have all permissions
-            return True
-        for role in self.roles:
-            if role.permissions.filter_by(name=permission_name).first() is not None:
-                return True
+        if self.is_admin: # Global Admin still overrides everything? 
+            # Or should is_admin be facility scoped too? 
+            # The prompt implies "transversal profile to multiple facilities as admin", 
+            # so `is_admin` column on User might be legacy "Super Admin" or needs to be removed.
+            # For now, let's assume `is_admin` is a super-superuser content. 
+            pass 
+            # Wait, the prompt says "there are admin users that have capabilities... of their facilities".
+            # So "Admin" is just a Role now.
+            # But the User model has `is_admin` boolean (line 174).
+            
+        if self.is_admin:
+             return True
+
+        # Check roles in the specific facility
+        if facility_id:
+            for fr in self.facility_roles:
+                if fr.facility_id == facility_id and fr.is_approved:
+                    if fr.role.permissions.filter_by(name=permission_name).first() is not None:
+                        return True
+            return False
+            
+        # Fallback for no facility context (maybe mostly for 'self_...' permissions?)
+        for fr in self.facility_roles:
+             if fr.role.permissions.filter_by(name=permission_name).first() is not None:
+                 return True
         return False
 
     def set_password(self, password):
@@ -462,10 +543,8 @@ class User(UserMixin, db.Model):
         admin_user = cls(full_name=full_name, email=email, is_admin=True, is_approved=True)
         admin_user.set_password(password)
         db.session.add(admin_user)
-        db.session.flush() # Flush to get admin_user.id
-        admin_role = Role.query.filter_by(name='Admin').first()
-        if admin_role:
-            admin_user.roles.append(admin_role)
+        # Note: roles are now assigned via UserFacilityRole. 
+        # For a global super-admin, we rely on the is_admin flag for now.
         db.session.commit()
         return admin_user
 
@@ -497,6 +576,8 @@ def init_roles_and_permissions():
          'description': 'Create, edit, and delete roles and assign permissions to them.',
          'category': 'Admin Management'},
         {'name': 'permission_manage', 'description': 'View and manage permissions.',
+         'category': 'Admin Management'},
+        {'name': 'facility_manage', 'description': 'Create, edit, and delete facilities.',
          'category': 'Admin Management'},
 
         {'name': 'team_manage', 'description': 'Create, edit, and delete teams.',
@@ -645,8 +726,8 @@ class Role(db.Model):
 
     permissions = db.relationship('Permission', secondary=role_permission_association,
                                 backref='roles', lazy='dynamic')
-    users = db.relationship('User', secondary=user_role_association,
-                            back_populates='roles', lazy='dynamic')
+    # users relationship removed as it was back_populates='roles' from User which is now gone/changed.
+    # logic using Role.users needs to be updated to query UserFacilityRole.
 
     def __repr__(self):
         """
@@ -784,6 +865,9 @@ class TrainingSession(db.Model):
     animal_count = db.Column(db.Integer)
     attachment_path = db.Column(db.String(256)) # Path to uploaded attendance sheet or other document
     status = db.Column(db.String(64), default='Pending') # New status field
+    facility_id = db.Column(db.Integer, db.ForeignKey('facility.id'), nullable=True) # nullable for migration/compat
+    
+    facility = db.relationship('Facility', back_populates='training_sessions')
 
     main_species = db.relationship('Species', backref='training_sessions')
     attendees = db.relationship('User', secondary=training_session_attendees,
@@ -941,6 +1025,9 @@ class TrainingRequest(db.Model):
                         default=TrainingRequestStatus.PENDING, nullable=False)
     justification = db.Column(db.Text, nullable=True)
     preferred_date = db.Column(db.DateTime(timezone=True), nullable=True)
+    facility_id = db.Column(db.Integer, db.ForeignKey('facility.id'), nullable=True)
+
+    facility = db.relationship('Facility', back_populates='training_requests')
 
     requester = db.relationship('User', back_populates='training_requests')
     skills_requested = db.relationship('Skill', secondary=training_request_skills_requested,
@@ -982,6 +1069,9 @@ class ExternalTraining(db.Model):
     attachment_path = db.Column(db.String(256)) # Path to external certificate/document
     status = db.Column(db.Enum(ExternalTrainingStatus),
                         default=ExternalTrainingStatus.PENDING, nullable=False)
+    facility_id = db.Column(db.Integer, db.ForeignKey('facility.id'), nullable=True)
+    
+    facility = db.relationship('Facility', back_populates='external_trainings')
     validator_id = db.Column(db.Integer, db.ForeignKey('user.id'))
 
     user = db.relationship('User', back_populates='external_trainings',
@@ -1077,13 +1167,17 @@ class ContinuousTrainingEvent(db.Model):
     event_date = db.Column(db.DateTime(timezone=True), nullable=False)
     duration_hours = db.Column(db.Float, nullable=False)
     attachment_path = db.Column(db.String(256), nullable=True)
+    duration_hours = db.Column(db.Float, nullable=False)
+    attachment_path = db.Column(db.String(256), nullable=True)
     creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    facility_id = db.Column(db.Integer, db.ForeignKey('facility.id'), nullable=True)
     status = db.Column(db.Enum(ContinuousTrainingEventStatus),
                         default=ContinuousTrainingEventStatus.PENDING, nullable=False)
     validator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
 
     creator = db.relationship('User', foreign_keys=[creator_id],
                             back_populates='created_continuous_training_events')
+    facility = db.relationship('Facility', back_populates='continuous_training_events')
     validator = db.relationship('User', foreign_keys=[validator_id],
                                 back_populates='validated_continuous_training_events')
     user_attendances = db.relationship('UserContinuousTraining', back_populates='event',

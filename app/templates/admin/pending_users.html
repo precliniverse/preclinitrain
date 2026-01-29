@@ -2,36 +2,61 @@
 {% import 'bootstrap/wtf.html' as wtf %}
 
 {% block content %}
-    <h1>{{ title }}</h1>
-    {% if pending_users %}
-        <table class="table table-hover">
-            <thead>
-                <tr>
-                    <th>Full Name</th>
-                    <th>Email</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for user in pending_users %}
-                    <tr>
-                        <td>{{ user.full_name }}</td>
-                        <td>{{ user.email }}</td>
-                        <td>
-                            <form action="{{ url_for('admin.approve_user', user_id=user.id) }}" method="post" style="display: inline;">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn btn-success btn-sm">Approve</button>
-                            </form>
-                            <form action="{{ url_for('admin.reject_user', user_id=user.id) }}" method="post" style="display: inline;">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn btn-danger btn-sm">Reject</button>
-                            </form>
-                        </td>
-                    </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    {% else %}
-        <p>No pending user registrations.</p>
-    {% endif %}
+    <div class="row">
+        <div class="col-md-12">
+            <h1 class="mb-4"><i class="fas fa-user-clock me-2"></i>{{ title }}</h1>
+            
+            {% if pending_users %}
+                <div class="card shadow-sm">
+                    <div class="card-body p-0">
+                        <table class="table table-hover mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>{{ _('Full Name') }}</th>
+                                    <th>{{ _('Email') }}</th>
+                                    {% if is_transversal %}
+                                        <th>{{ _('Facility Requested') }}</th>
+                                    {% endif %}
+                                    <th>{{ _('Role Requested') }}</th>
+                                    <th>{{ _('Requested At') }}</th>
+                                    <th class="text-end">{{ _('Actions') }}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for ufr in pending_users %}
+                                    <tr>
+                                        <td><strong>{{ ufr.user.full_name }}</strong></td>
+                                        <td>{{ ufr.user.email }}</td>
+                                        {% if is_transversal %}
+                                            <td><span class="badge bg-outline-info border border-info text-info">{{ ufr.facility.name }}</span></td>
+                                        {% endif %}
+                                        <td><span class="badge bg-secondary">{{ ufr.role.name }}</span></td>
+                                        <td>{{ ufr.requested_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                                        <td class="text-end">
+                                            <form action="{{ url_for('admin.approve_user', user_id=ufr.user.id, facility_id=ufr.facility_id) }}" method="post" class="d-inline">
+                                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                                <button type="submit" class="btn btn-success btn-sm">
+                                                    <i class="fas fa-check me-1"></i>{{ _('Approve') }}
+                                                </button>
+                                            </form>
+                                            <form action="{{ url_for('admin.reject_user', user_id=ufr.user.id, facility_id=ufr.facility_id) }}" method="post" class="d-inline">
+                                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                                <button type="submit" class="btn btn-danger btn-sm">
+                                                    <i class="fas fa-times me-1"></i>{{ _('Reject') }}
+                                                </button>
+                                            </form>
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            {% else %}
+                <div class="alert alert-info">
+                    <i class="fas fa-info-circle me-2"></i>{{ _('No pending user registrations.') }}
+                </div>
+            {% endif %}
+        </div>
+    </div>
 {% endblock %}

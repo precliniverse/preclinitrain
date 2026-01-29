@@ -1,6 +1,6 @@
 <p>Dear {{ user.full_name }},</p>
 
-<p>Good news! Your account for the PrecliniTrain application has been approved by an administrator.</p>
+<p>Good news! Your access for the PrecliniTrain application{% if facility %} at <strong>{{ facility.name }}</strong>{% endif %} has been approved by an administrator.</p>
 
 <p>You can now log in using your registered email and password.</p>
 

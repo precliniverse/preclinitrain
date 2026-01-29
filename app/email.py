@@ -19,6 +19,10 @@ def send_email(subject, sender, recipients, text_body, html_body):
     """
     Composes and sends an email using Flask-Mail.
     """
+    if not current_app.config.get('MAIL_ENABLED'):
+        current_app.logger.warning(f"Mail is disabled. Would have sent email '{subject}' to {recipients}")
+        return
+
     msg = Message(subject, sender=sender, recipients=recipients)
     msg.body = text_body
     msg.html = html_body

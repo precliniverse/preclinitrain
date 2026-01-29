@@ -45,28 +45,52 @@ def register():
     if current_user.is_authenticated:
         return redirect(url_for('dashboard.user_profile'))
     form = RegistrationForm()
+    # Populate facilities choices
+    from app.models import Facility, UserFacilityRole, Role
+    form.facilities.choices = [(f.id, f.name) for f in Facility.query.all()]
+
     if form.validate_on_submit():
         user = User(full_name=form.full_name.data, email=form.email.data)
         user.set_password(form.password.data)
         db.session.add(user)
-        db.session.commit()
-        flash('Congratulations, you are now a registered user! Your account is awaiting administrator approval.')
+        db.session.flush() # Get user ID
 
-        # Send email to user about pending approval
+        # Handle facility roles
+        default_role = Role.query.filter_by(name='User').first()
+        selected_facilities = Facility.query.filter(Facility.id.in_(form.facilities.data)).all()
+        
+        for facility in selected_facilities:
+            ufr = UserFacilityRole(user=user, facility=facility, role=default_role, is_approved=False)
+            db.session.add(ufr)
+            
+            # Notify admins of THIS facility
+            # Find users who have 'Admin' role in THIS facility
+            # We need to query UserFacilityRole for this facility with Admin role
+            admin_role = Role.query.filter_by(name='Admin').first()
+            facility_admins = UserFacilityRole.query.filter_by(
+                facility_id=facility.id, 
+                role_id=admin_role.id,
+                is_approved=True
+            ).all()
+            
+            recipients = [ufr_admin.user.email for ufr_admin in facility_admins]
+            
+            if recipients:
+                send_email(f'[PrecliniTrain] New User Registration for {facility.name}',
+                           sender=current_app.config['MAIL_USERNAME'],
+                           recipients=recipients,
+                           text_body=render_template('email/admin_new_registration.txt', user=user, facility=facility),
+                           html_body=render_template('email/admin_new_registration.html', user=user, facility=facility))
+
+        db.session.commit()
+        flash('Congratulations, you are now a registered user! Your specific facility access requests are awaiting administrator approval.')
+
+        # Send email to user about pending approval (general)
         send_email('[PrecliniTrain] Your Account is Awaiting Approval',
                    sender=current_app.config['MAIL_USERNAME'],
                    recipients=[user.email],
                    text_body=render_template('email/registration_pending.txt', user=user),
                    html_body=render_template('email/registration_pending.html', user=user))
-
-        # Notify admins
-        admins = User.query.filter_by(is_admin=True).all()
-        for admin in admins:
-            send_email('[PrecliniTrain] New User Registration Awaiting Approval',
-                       sender=current_app.config['MAIL_USERNAME'],
-                       recipients=[admin.email],
-                       text_body=render_template('email/admin_new_registration.txt', user=user),
-                       html_body=render_template('email/admin_new_registration.html', user=user))
 
         return redirect(url_for('auth.login'))
     return render_template('auth/register.html', title='Register', form=form)
